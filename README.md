@@ -51,6 +51,22 @@ $ python3 run_demo.py
 ```
 The results will be saved in the `./runs` folder.
 
+* In our scenario it will be:
+```
+$ git clone https://github.com/yuxiangsun/RTFNet.git
+$ cd RTFNet
+$ docker build -t docker_image_rtfnet .
+$ mkdir -p weights_backup/RTFNet_50
+$ cd RTFNet_50
+$ (put final.pth in this folder)
+$ docker run -it --shm-size 8G -p 1234:6006 --name docker_container_rtfnet --gpus all -v ~/mid_fusion/rtfnet/RTFNet:/workspace docker_image_rtfnet
+$ (currently, you should be in the docker)
+$ cd /workspace
+$ python3 run_demo.py
+(The results will be saved in the ./runs folder.)
+```
+The results will be saved in the `./runs` folder.
+
 * To train RTFNet (for different RTFNet variants, please mannully change `num_resnet_layers` in `RTFNet.py`):
 ```
 $ docker run -it --shm-size 8G -p 1234:6006 --name docker_container_rtfnet --gpus all -v ~/RTFNet:/workspace docker_image_rtfnet

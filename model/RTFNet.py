@@ -237,6 +237,7 @@ class TransBottleneck(nn.Module):
 
         return out
 
+
 def unit_test():
     num_minibatch = 2
     rgb = torch.randn(num_minibatch, 3, 480, 640).cuda(0)
@@ -245,6 +246,7 @@ def unit_test():
     input = torch.cat((rgb, thermal), dim=1)
     rtf_net(input)
     #print('The model: ', rtf_net.modules)
+
 
 if __name__ == '__main__':
     unit_test()
