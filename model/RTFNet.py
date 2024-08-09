@@ -1,17 +1,18 @@
 # coding:utf-8
-# By Yuxiang Sun, Aug. 2, 2019
-# Email: sun.yuxiang@outlook.com
+# Original By Yuxiang Sun, Aug. 2, 2019
+# Modified By Meixi Lu
 
 import torch
 import torch.nn as nn 
 import torchvision.models as models 
 
+
 class RTFNet(nn.Module):
 
-    def __init__(self, n_class):
+    def __init__(self, n_class, num_resnet_layers=50, num_lstm_layers=1, lstm_hidden_size=512):
         super(RTFNet, self).__init__()
 
-        self.num_resnet_layers = 152
+        self.num_resnet_layers = num_resnet_layers
 
         if self.num_resnet_layers == 18:
             resnet_raw_model1 = models.resnet18(pretrained=True)
@@ -57,185 +58,108 @@ class RTFNet(nn.Module):
         self.encoder_rgb_layer3 = resnet_raw_model2.layer3
         self.encoder_rgb_layer4 = resnet_raw_model2.layer4
 
-        ########  DECODER  ########
+        # LSTM module
+        self.lstm = nn.LSTM(input_size=self.inplanes, hidden_size=lstm_hidden_size, num_layers=num_lstm_layers, batch_first=True)
 
-        self.deconv1 = self._make_transpose_layer(TransBottleneck, self.inplanes//2, 2, stride=2) # using // for python 3.6
-        self.deconv2 = self._make_transpose_layer(TransBottleneck, self.inplanes//2, 2, stride=2) # using // for python 3.6
-        self.deconv3 = self._make_transpose_layer(TransBottleneck, self.inplanes//2, 2, stride=2) # using // for python 3.6
-        self.deconv4 = self._make_transpose_layer(TransBottleneck, self.inplanes//2, 2, stride=2) # using // for python 3.6
-        self.deconv5 = self._make_transpose_layer(TransBottleneck, n_class, 2, stride=2)
- 
-    def _make_transpose_layer(self, block, planes, blocks, stride=1):
+        # Classifier
+        self.classifier = nn.Linear(lstm_hidden_size, n_class)
 
-        upsample = None
-        if stride != 1:
-            upsample = nn.Sequential(
-                nn.ConvTranspose2d(self.inplanes, planes, kernel_size=2, stride=stride, padding=0, bias=False),
-                nn.BatchNorm2d(planes),
-            ) 
-        elif self.inplanes != planes:
-            upsample = nn.Sequential(
-                nn.Conv2d(self.inplanes, planes, kernel_size=1, stride=stride, padding=0, bias=False),
-                nn.BatchNorm2d(planes),
-            ) 
- 
-        for m in upsample.modules():
-            if isinstance(m, nn.ConvTranspose2d):
-                nn.init.xavier_uniform_(m.weight.data)
-            elif isinstance(m, nn.BatchNorm2d):
-                m.weight.data.fill_(1)
-                m.bias.data.zero_()
-
-        layers = []
-
-        for i in range(1, blocks):
-            layers.append(block(self.inplanes, self.inplanes))
-
-        layers.append(block(self.inplanes, planes, stride, upsample))
-        self.inplanes = planes
-
-        return nn.Sequential(*layers)
- 
     def forward(self, input):
 
-        rgb = input[:,:3]
-        thermal = input[:,3:]
+        batch_size, num_frames, _, _, _ = input.size()  # assuming input size is (batch, frames, channels, height, width)
 
-        verbose = False
+        # Initialize an empty list to store features for each frame
+        features = []
 
-        # encoder
+        for t in range(num_frames):
+            rgb = input[:, t, :3]
+            thermal = input[:, t, 3:]
 
-        ######################################################################
+            # encoder
 
-        if verbose: print("rgb.size() original: ", rgb.size())  # (480, 640)
-        if verbose: print("thermal.size() original: ", thermal.size()) # (480, 640)
+            ######################################################################
 
-        ######################################################################
+            print("rgb.size() original: ", rgb.size())  # (480, 640)
+            print("thermal.size() original: ", thermal.size()) # (480, 640)
 
-        rgb = self.encoder_rgb_conv1(rgb)
-        if verbose: print("rgb.size() after conv1: ", rgb.size()) # (240, 320)
-        rgb = self.encoder_rgb_bn1(rgb)
-        if verbose: print("rgb.size() after bn1: ", rgb.size())  # (240, 320)
-        rgb = self.encoder_rgb_relu(rgb)
-        if verbose: print("rgb.size() after relu: ", rgb.size())  # (240, 320)
+            ######################################################################
 
-        thermal = self.encoder_thermal_conv1(thermal)
-        if verbose: print("thermal.size() after conv1: ", thermal.size()) # (240, 320)
-        thermal = self.encoder_thermal_bn1(thermal)
-        if verbose: print("thermal.size() after bn1: ", thermal.size()) # (240, 320)
-        thermal = self.encoder_thermal_relu(thermal)
-        if verbose: print("thermal.size() after relu: ", thermal.size())  # (240, 320)
+            rgb = self.encoder_rgb_conv1(rgb)
+            print("rgb.size() after conv1: ", rgb.size()) # (240, 320)
+            rgb = self.encoder_rgb_bn1(rgb)
+            print("rgb.size() after bn1: ", rgb.size())  # (240, 320)
+            rgb = self.encoder_rgb_relu(rgb)
+            print("rgb.size() after relu: ", rgb.size())  # (240, 320)
 
-        rgb = rgb + thermal
+            thermal = self.encoder_thermal_conv1(thermal)
+            print("thermal.size() after conv1: ", thermal.size()) # (240, 320)
+            thermal = self.encoder_thermal_bn1(thermal)
+            print("thermal.size() after bn1: ", thermal.size()) # (240, 320)
+            thermal = self.encoder_thermal_relu(thermal)
+            print("thermal.size() after relu: ", thermal.size())  # (240, 320)
 
-        rgb = self.encoder_rgb_maxpool(rgb)
-        if verbose: print("rgb.size() after maxpool: ", rgb.size()) # (120, 160)
+            rgb = rgb + thermal
 
-        thermal = self.encoder_thermal_maxpool(thermal)
-        if verbose: print("thermal.size() after maxpool: ", thermal.size()) # (120, 160)
+            rgb = self.encoder_rgb_maxpool(rgb)
+            print("rgb.size() after maxpool: ", rgb.size()) # (120, 160)
 
-        ######################################################################
+            thermal = self.encoder_thermal_maxpool(thermal)
+            print("thermal.size() after maxpool: ", thermal.size()) # (120, 160)
 
-        rgb = self.encoder_rgb_layer1(rgb)
-        if verbose: print("rgb.size() after layer1: ", rgb.size()) # (120, 160)
-        thermal = self.encoder_thermal_layer1(thermal)
-        if verbose: print("thermal.size() after layer1: ", thermal.size()) # (120, 160)
+            ######################################################################
 
-        rgb = rgb + thermal
+            rgb = self.encoder_rgb_layer1(rgb)
+            print("rgb.size() after layer1: ", rgb.size()) # (120, 160)
+            thermal = self.encoder_thermal_layer1(thermal)
+            print("thermal.size() after layer1: ", thermal.size()) # (120, 160)
 
-        ######################################################################
- 
-        rgb = self.encoder_rgb_layer2(rgb)
-        if verbose: print("rgb.size() after layer2: ", rgb.size()) # (60, 80)
-        thermal = self.encoder_thermal_layer2(thermal)
-        if verbose: print("thermal.size() after layer2: ", thermal.size()) # (60, 80)
+            rgb = rgb + thermal
 
-        rgb = rgb + thermal
+            ######################################################################
 
-        ######################################################################
+            rgb = self.encoder_rgb_layer2(rgb)
+            print("rgb.size() after layer2: ", rgb.size()) # (60, 80)
+            thermal = self.encoder_thermal_layer2(thermal)
+            print("thermal.size() after layer2: ", thermal.size()) # (60, 80)
 
-        rgb = self.encoder_rgb_layer3(rgb)
-        if verbose: print("rgb.size() after layer3: ", rgb.size()) # (30, 40)
-        thermal = self.encoder_thermal_layer3(thermal)
-        if verbose: print("thermal.size() after layer3: ", thermal.size()) # (30, 40)
+            rgb = rgb + thermal
 
-        rgb = rgb + thermal
+            ######################################################################
 
-        ######################################################################
+            rgb = self.encoder_rgb_layer3(rgb)
+            print("rgb.size() after layer3: ", rgb.size()) # (30, 40)
+            thermal = self.encoder_thermal_layer3(thermal)
+            print("thermal.size() after layer3: ", thermal.size()) # (30, 40)
 
-        rgb = self.encoder_rgb_layer4(rgb)
-        if verbose: print("rgb.size() after layer4: ", rgb.size()) # (15, 20)
-        thermal = self.encoder_thermal_layer4(thermal)
-        if verbose: print("thermal.size() after layer4: ", thermal.size()) # (15, 20)
+            rgb = rgb + thermal
 
-        fuse = rgb + thermal
+            ######################################################################
 
-        ######################################################################
+            rgb = self.encoder_rgb_layer4(rgb)
+            print("rgb.size() after layer4: ", rgb.size()) # (15, 20)
+            thermal = self.encoder_thermal_layer4(thermal)
+            print("thermal.size() after layer4: ", thermal.size()) # (15, 20)
 
-        # decoder
+            fuse = rgb + thermal
 
-        fuse = self.deconv1(fuse)
-        if verbose: print("fuse after deconv1: ", fuse.size()) # (30, 40)
-        fuse = self.deconv2(fuse)
-        if verbose: print("fuse after deconv2: ", fuse.size()) # (60, 80)
-        fuse = self.deconv3(fuse)
-        if verbose: print("fuse after deconv3: ", fuse.size()) # (120, 160)
-        fuse = self.deconv4(fuse)
-        if verbose: print("fuse after deconv4: ", fuse.size()) # (240, 320)
-        fuse = self.deconv5(fuse)
-        if verbose: print("fuse after deconv5: ", fuse.size()) # (480, 640)
+            ######################################################################
 
-        return fuse
-  
-class TransBottleneck(nn.Module):
+            # Global Average Pooling
+            fuse = nn.AdaptiveAvgPool2d((1, 1))(fuse)
+            fuse = fuse.view(batch_size, -1)  # Flatten
 
-    def __init__(self, inplanes, planes, stride=1, upsample=None):
-        super(TransBottleneck, self).__init__()
-        self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)  
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)  
-        self.bn2 = nn.BatchNorm2d(planes)
+            features.append(fuse)
 
-        if upsample is not None and stride != 1:
-            self.conv3 = nn.ConvTranspose2d(planes, planes, kernel_size=2, stride=stride, padding=0, bias=False)  
-        else:
-            self.conv3 = nn.Conv2d(planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)  
+        # Stack the features along the time dimension
+        features = torch.stack(features, dim=1)  # shape (batch, frames, features)
 
-        self.bn3 = nn.BatchNorm2d(planes)
-        self.relu = nn.ReLU(inplace=True)
-        self.upsample = upsample
-        self.stride = stride
- 
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.xavier_uniform_(m.weight.data)
-            elif isinstance(m, nn.ConvTranspose2d):
-                nn.init.xavier_uniform_(m.weight.data)
-            elif isinstance(m, nn.BatchNorm2d):
-                m.weight.data.fill_(1)
-                m.bias.data.zero_()
+        # Pass through LSTM
+        lstm_out, _ = self.lstm(features)
 
-    def forward(self, x):
-        residual = x
+        # Classification
+        output = self.classifier(lstm_out[:, -1, :])  # Use the last LSTM output for classification
 
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-
-        out = self.conv2(out)
-        out = self.bn2(out)
-        out = self.relu(out)
-
-        out = self.conv3(out)
-        out = self.bn3(out)
-
-        if self.upsample is not None:
-            residual = self.upsample(x)
-
-        out += residual
-        out = self.relu(out)
-
-        return out
+        return output
 
 
 def unit_test():
