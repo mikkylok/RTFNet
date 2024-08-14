@@ -132,9 +132,12 @@ def process_data(pid, input_csv, output_dir, data_split):
             rgb_array.append(rgb_image)
             thermal_array.append(thermal_image)
             rgb_filenames.append(os.path.basename(rgb_image_path))  # Store the original RGB filename
-            thermal_filenames.append(os.path.basename(thermal_npy_path))  # Store the original thermal filename
+            # Change the thermal filename from .npy to .jpg
+            thermal_filename = os.path.basename(thermal_npy_path)
+            thermal_filename = os.path.splitext(thermal_filename)[0] + '.jpg'
+            thermal_filenames.append(thermal_filename)  # Store the modified thermal filename
 
-        # Save rgb and thermal images in respective folders
+
         image_output_dir = os.path.join(output_dir, 'P' + str(data_pid), 'rgbt-mid-fusion-rtfnet', 'image')
         sequence_name = f"{start}_{end}_{len(rgb_array)}"
         rgb_output_dir = os.path.join(image_output_dir, sequence_name, 'rgb')
@@ -143,7 +146,7 @@ def process_data(pid, input_csv, output_dir, data_split):
         os.makedirs(rgb_output_dir, exist_ok=True)
         os.makedirs(thermal_output_dir, exist_ok=True)
 
-        # Save the images
+        # Save rgb and thermal images in respective folders
         for idx in range(len(rgb_array)):
             rgb_image = rgb_array[idx]
             thermal_image = thermal_array[idx]
@@ -152,18 +155,18 @@ def process_data(pid, input_csv, output_dir, data_split):
 
             rgb_save_path = os.path.join(rgb_output_dir, rgb_filename)
             thermal_save_path = os.path.join(thermal_output_dir, thermal_filename)
+            # print(len(rgb_array), idx, rgb_save_path, thermal_save_path)
 
             # Save the RGB and thermal images
             cv2.imwrite(rgb_save_path, cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR))  # Convert back to BGR for saving
             cv2.imwrite(thermal_save_path, thermal_image)
 
         # Save the timestamp and label in the csv
-        label_list.append((sequence_name, label))
+        label_list.append((os.path.join(image_output_dir, sequence_name), label))
 
         # Logging
         print('participant id: ', pid, '; data split: ', data_split, '; data pid: ', data_pid,
               '; label: ', label, '; index of videos: ', len(rgb_array))
-
 
     # Save the timestamp and label in the csv
     label_df = pd.DataFrame(label_list)
@@ -204,3 +207,9 @@ if __name__ == '__main__':
 
     with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
         pool.starmap(process_data, tasks)
+
+    # tasks = []
+    # for pid in smoking_pids:
+    #     input_csv = f"/ssd2/R21_Clips/loso-data--for12participants/P{pid}/multi-rgb_losoBalanced"
+    #     for data_split in data_splits:
+    #         process_data(pid, input_csv, output_dir, data_split)
