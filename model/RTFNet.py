@@ -2,15 +2,22 @@
 # Original By Yuxiang Sun, Aug. 2, 2019
 # Modified By Meixi Lu
 
+
 import torch
 import torch.nn as nn 
 import torchvision.models as models 
+import torch.nn.utils.rnn as rnn_utils
 
 
 class RTFNet(nn.Module):
 
-    def __init__(self, n_class, num_resnet_layers=50, num_lstm_layers=1, lstm_hidden_size=512):
+    def __init__(self, n_class=3,
+                 num_resnet_layers=50,
+                 num_lstm_layers=1,
+                 lstm_hidden_size=512,
+                 device=torch.device('cuda:0')):
         super(RTFNet, self).__init__()
+        self.device = device  # Assign the device
 
         self.num_resnet_layers = num_resnet_layers
 
@@ -64,113 +71,110 @@ class RTFNet(nn.Module):
         # Classifier
         self.classifier = nn.Linear(lstm_hidden_size, n_class)
 
-    def forward(self, input):
+        # Move all modules to the specified device
+        self.to(self.device)
 
-        batch_size, num_frames, _, _, _ = input.size()  # assuming input size is (batch, frames, channels, height, width)
+    def forward(self, rgb_images, thermal_images, lengths):
 
         # Initialize an empty list to store features for each frame
         features = []
 
-        for t in range(num_frames):
-            rgb = input[:, t, :3]
-            thermal = input[:, t, 3:]
+        for t in range(rgb_images.size(1)):  # iterate over time dimension
+            rgb = rgb_images[:, t]
+            thermal = thermal_images[:, t]
 
             # encoder
 
-            ######################################################################
-
-            print("rgb.size() original: ", rgb.size())  # (480, 640)
-            print("thermal.size() original: ", thermal.size()) # (480, 640)
-
-            ######################################################################
-
             rgb = self.encoder_rgb_conv1(rgb)
-            print("rgb.size() after conv1: ", rgb.size()) # (240, 320)
             rgb = self.encoder_rgb_bn1(rgb)
-            print("rgb.size() after bn1: ", rgb.size())  # (240, 320)
             rgb = self.encoder_rgb_relu(rgb)
-            print("rgb.size() after relu: ", rgb.size())  # (240, 320)
 
             thermal = self.encoder_thermal_conv1(thermal)
-            print("thermal.size() after conv1: ", thermal.size()) # (240, 320)
             thermal = self.encoder_thermal_bn1(thermal)
-            print("thermal.size() after bn1: ", thermal.size()) # (240, 320)
             thermal = self.encoder_thermal_relu(thermal)
-            print("thermal.size() after relu: ", thermal.size())  # (240, 320)
 
             rgb = rgb + thermal
 
             rgb = self.encoder_rgb_maxpool(rgb)
-            print("rgb.size() after maxpool: ", rgb.size()) # (120, 160)
-
             thermal = self.encoder_thermal_maxpool(thermal)
-            print("thermal.size() after maxpool: ", thermal.size()) # (120, 160)
-
-            ######################################################################
 
             rgb = self.encoder_rgb_layer1(rgb)
-            print("rgb.size() after layer1: ", rgb.size()) # (120, 160)
             thermal = self.encoder_thermal_layer1(thermal)
-            print("thermal.size() after layer1: ", thermal.size()) # (120, 160)
 
             rgb = rgb + thermal
-
-            ######################################################################
 
             rgb = self.encoder_rgb_layer2(rgb)
-            print("rgb.size() after layer2: ", rgb.size()) # (60, 80)
             thermal = self.encoder_thermal_layer2(thermal)
-            print("thermal.size() after layer2: ", thermal.size()) # (60, 80)
 
             rgb = rgb + thermal
-
-            ######################################################################
 
             rgb = self.encoder_rgb_layer3(rgb)
-            print("rgb.size() after layer3: ", rgb.size()) # (30, 40)
             thermal = self.encoder_thermal_layer3(thermal)
-            print("thermal.size() after layer3: ", thermal.size()) # (30, 40)
 
             rgb = rgb + thermal
 
-            ######################################################################
-
             rgb = self.encoder_rgb_layer4(rgb)
-            print("rgb.size() after layer4: ", rgb.size()) # (15, 20)
             thermal = self.encoder_thermal_layer4(thermal)
-            print("thermal.size() after layer4: ", thermal.size()) # (15, 20)
 
             fuse = rgb + thermal
 
-            ######################################################################
-
             # Global Average Pooling
             fuse = nn.AdaptiveAvgPool2d((1, 1))(fuse)
-            fuse = fuse.view(batch_size, -1)  # Flatten
+            fuse = fuse.view(fuse.size(0), -1)  # Flatten
 
             features.append(fuse)
 
         # Stack the features along the time dimension
         features = torch.stack(features, dim=1)  # shape (batch, frames, features)
 
-        # Pass through LSTM
-        lstm_out, _ = self.lstm(features)
+        # Pack the sequences
+        packed_features = rnn_utils.pack_padded_sequence(features, lengths, batch_first=True, enforce_sorted=False)
 
-        # Classification
-        output = self.classifier(lstm_out[:, -1, :])  # Use the last LSTM output for classification
+        # packed_lstm_out, _ = self.lstm(packed_features)
+        # lstm_out, _ = rnn_utils.pad_packed_sequence(packed_lstm_out, batch_first=True)
+        # output = self.classifier(lstm_out[:, -1, :])
+
+        packed_lstm_out, (hn, _) = self.lstm(packed_features)
+        final_output = hn[-1]  # Take the last hidden state
+        output = self.classifier(final_output)  # Pass through the classifier
 
         return output
 
 
 def unit_test():
+    device_ids = [0, 1]  # Use GPU 0 and GPU 1
     num_minibatch = 2
-    rgb = torch.randn(num_minibatch, 3, 480, 640).cuda(0)
-    thermal = torch.randn(num_minibatch, 1, 480, 640).cuda(0)
-    rtf_net = RTFNet(9).cuda(0)
-    input = torch.cat((rgb, thermal), dim=1)
-    rtf_net(input)
-    #print('The model: ', rtf_net.modules)
+    num_frames = 5  # Set a number of frames per sequence
+
+    # Create dummy data for RGB and Thermal images
+    rgb = torch.randn(num_minibatch, num_frames, 3, 480, 640, dtype=torch.float32)
+    thermal = torch.randn(num_minibatch, num_frames, 1, 480, 640, dtype=torch.float32)
+
+    # Move input data to the first device (GPU 0)
+    rgb = rgb.cuda(device_ids[0])
+    thermal = thermal.cuda(device_ids[0])
+
+    # Initialize the model
+    rtf_net = RTFNet(n_class=3).to(device_ids[0])  # Adjust `n_class` based on your use case
+
+    # Wrap the model with DataParallel and move it to the first GPU
+    rtf_net = nn.DataParallel(rtf_net, device_ids=device_ids).cuda(device_ids[0])
+
+    # Provide lengths for the sequences, here they are all 5 since num_frames=5
+    lengths = [num_frames] * num_minibatch
+    lengths = torch.tensor(lengths, dtype=torch.int64).cpu()  # Ensure lengths is a CPU tensor with int64 type
+
+    # Perform forward pass
+    try:
+        output = rtf_net(rgb, thermal, lengths)
+        print(output)
+        print(output.shape)  # Should print the shape of the output
+    except RuntimeError as e:
+        print("RuntimeError:", e)
+        print("CUDA_LAUNCH_BLOCKING set to 1 for debugging")
+        raise e
 
 
 if __name__ == '__main__':
     unit_test()
+

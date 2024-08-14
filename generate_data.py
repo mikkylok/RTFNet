@@ -1,62 +1,52 @@
+import os
 import cv2
 import numpy as np
+import pandas as pd
+import multiprocessing
 
 
-def display_dataset():
-    img_path = "/Users/mikky/Downloads/dataset/images/01353N.png"
-    label_path = "/Users/mikky/Downloads/dataset/labels/01353N.png"
+def mean_valids(thermal_data):
+    """
+    Remove outliers
+    """
+    original = thermal_data.copy()
+    findMean = thermal_data.copy()
 
-    img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
-    label = cv2.imread(label_path, cv2.IMREAD_UNCHANGED)
-    print(img.shape)
-    print (img)
-    print (label)
+    num_invalid = 0
+    num_invalid = num_invalid + len(findMean[findMean < -40]) + len(findMean[findMean > 300])
 
+    if num_invalid == 768:
+        return None
+    elif num_invalid != 0:
+        findMean[findMean < -40] = 0
+        findMean[findMean > 300] = 0
+        adjusted_mean = np.sum(findMean) / (768 - num_invalid)
 
-def sample_frames(video_path, num_frames=3):
-    cap = cv2.VideoCapture(video_path)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
+        original[original < -40] = adjusted_mean
+        original[original > 300] = adjusted_mean
 
-    frames = []
-    for idx in frame_indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ret, frame = cap.read()
-        if ret:
-            frames.append(frame)
-        else:
-            print(f"Failed to read frame at index {idx}")
-
-    cap.release()
-    return frames
+    return original
 
 
-def combine_frames(rgb_frame, thermal_frame):
-    combined_frame = np.dstack((rgb_frame, thermal_frame))
-    return combined_frame
-
-
-def save_combined_frames(combined_frames, output_dir, CALIBRATION):
-    for i, frame in enumerate(combined_frames):
-        calibration = '_calibration' if CALIBRATION else ''
-        output_path = f'{output_dir}/combined_frame_{i + 1}{calibration}.png'
-        cv2.imwrite(output_path, frame)
-        print(f'Saved {output_path}')
-
-
-def preprocess_thermal(rgb_img, thermal_img, calibration=True):
+def preprocess_thermal(rgb_img, thermal_img, calibration=False):
     """
     :param rgb_img: rgb_img is for calibration
     :param thermal_img:
     :return:
     """
-    # Grayscale thermal
-    thermal_img = cv2.cvtColor(thermal_img, cv2.COLOR_BGR2GRAY)
-    # Calibration
+    # 1. Remove outliers
+    thermal_img = mean_valids(thermal_img)
+    if thermal_img is None:
+        return None
+    # 2. Normalize the value within 0 - 255
+    thermal_img = cv2.normalize(thermal_img, thermal_img, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    # 3. Make the person face up
+    thermal_img = cv2.rotate(thermal_img, cv2.ROTATE_180)
+    # 4. Calibrate the thermal image to match rgb image
     if calibration:
         ribboned_thermal_img = calibrate_thermal(rgb_img, thermal_img)
     else:
-        ribboned_thermal_img = cv2.resize(thermal_img, (640, 480), interpolation=cv2.INTER_LINEAR)
+        ribboned_thermal_img = thermal_img
     return ribboned_thermal_img
 
 
@@ -76,7 +66,7 @@ def calibrate_thermal(rgb_img, thermal_img):
     thermal_img_resized = cv2.resize(thermal_img.reshape(24, 32),
                                      (width - (ribbon_offset_x_left + ribbon_offset_x_right),
                                       height - (ribbon_offset_y_top + ribbon_offset_y_bottom)),
-                                     interpolation=cv2.INTER_LINEAR)
+                                     interpolation=cv2.INTER_NEAREST)
 
     # Place the resized thermal image into the black image at the correct position
     black_image[ribbon_offset_y_top:height - ribbon_offset_y_bottom,
@@ -85,27 +75,132 @@ def calibrate_thermal(rgb_img, thermal_img):
     return black_image
 
 
-def generate_test_images():
-    # Paths to your RGB and thermal videos
-    rgb_video_path = '/Users/mikky/Downloads/1677760130200_1677760134400_18_rgb.mp4'
-    thermal_video_path = '/Users/mikky/Downloads/1677760130200_1677760134400_18_thermal.mp4'
+def process_data(pid, input_csv, output_dir, data_split):
+    # Read video clips info
+    clips_csv = os.path.join(input_csv.format(pid=pid), data_split + ".csv")
+    clips_df = pd.read_csv(clips_csv, names=['clip_path', 'label'])
 
-    # Sample frames
-    rgb_frames = sample_frames(rgb_video_path)
-    thermal_frames = sample_frames(thermal_video_path)
+    # Define label dataframe
+    label_list = []
 
-    CALIBRATION = False
-    # Preprocess thermal images
-    thermal_frames = [preprocess_thermal(rgb, thermal, calibration=CALIBRATION) for rgb, thermal in zip(rgb_frames, thermal_frames)]
+    # Loop through clips_df
+    for idx, row in clips_df.iterrows():
+        # Get start and end timestamps
+        clip_path = row['clip_path']
+        data_pid = int(clip_path.split('/')[3].split('P')[1])
+        label = row['label']
+        start = int(clip_path.split('/')[-1].split('_')[0])
+        end = int(clip_path.split('/')[-1].split('_')[1])
 
-    # Step 2: Combine Frames
-    combined_frames = [combine_frames(rgb, thermal) for rgb, thermal in zip(rgb_frames, thermal_frames)]
+        ts_df = pd.read_csv(os.path.join(DIR_MAP[data_pid], 'timestamps.csv'))
+        # Get start and end frames
+        filtered_df = ts_df[(ts_df['timestamp'] >= start) & (ts_df['timestamp'] <= end)]
+        rgb_frames = filtered_df['rgb_path'].sort_values().tolist()
+        thermal_npy_frames = filtered_df['thermal_numpy_path'].sort_values().tolist()
 
-    # Step 3: Save as PNG
-    output_dir = 'dataset/images'
-    save_combined_frames(combined_frames, output_dir, CALIBRATION)
+        if len(rgb_frames) == 0:
+            print(f"***** No frames between start and end! Error here! ***** start: ",  start, 'end: ', end)
+            continue
+        if len(rgb_frames) != len(thermal_npy_frames):
+            print(f"***** RGB and Thermal sequence length do not match. *****")
+            continue
 
-generate_test_images()
+        # Create RGB-T frames
+        rgb_array = []
+        thermal_array = []
+        rgb_filenames = []  # Store original RGB filenames
+        thermal_filenames = []  # Store original thermal filenames
+
+        for idx, file_name in enumerate(thermal_npy_frames):
+            rgb_image_path = rgb_frames[idx]
+            thermal_npy_path = thermal_npy_frames[idx]
+            try:
+                bgr_image = cv2.imread(os.path.join(DIR_MAP[data_pid], rgb_image_path))
+                rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
+                rgb_image = cv2.rotate(rgb_image, cv2.ROTATE_180)
+                height, width, _ = rgb_image.shape
+
+                thermal_data = np.load(os.path.join(DIR_MAP[data_pid], thermal_npy_path))
+                thermal_image = preprocess_thermal(rgb_image, thermal_data, calibration=False)
+                thermal_image = cv2.resize(thermal_image, (width, height))
+                if thermal_image is None:
+                    # Skip when thermal image contains too many outliers
+                    continue
+            except Exception as e:
+                print(e)
+                continue
+            rgb_array.append(rgb_image)
+            thermal_array.append(thermal_image)
+            rgb_filenames.append(os.path.basename(rgb_image_path))  # Store the original RGB filename
+            thermal_filenames.append(os.path.basename(thermal_npy_path))  # Store the original thermal filename
+
+        # Save rgb and thermal images in respective folders
+        image_output_dir = os.path.join(output_dir, 'P' + str(data_pid), 'rgbt-mid-fusion-rtfnet', 'image')
+        sequence_name = f"{start}_{end}_{len(rgb_array)}"
+        rgb_output_dir = os.path.join(image_output_dir, sequence_name, 'rgb')
+        thermal_output_dir = os.path.join(image_output_dir, sequence_name, 'thermal')
+        # Create the directories if they don't exist
+        os.makedirs(rgb_output_dir, exist_ok=True)
+        os.makedirs(thermal_output_dir, exist_ok=True)
+
+        # Save the images
+        for idx in range(len(rgb_array)):
+            rgb_image = rgb_array[idx]
+            thermal_image = thermal_array[idx]
+            rgb_filename = rgb_filenames[idx]
+            thermal_filename = thermal_filenames[idx]
+
+            rgb_save_path = os.path.join(rgb_output_dir, rgb_filename)
+            thermal_save_path = os.path.join(thermal_output_dir, thermal_filename)
+
+            # Save the RGB and thermal images
+            cv2.imwrite(rgb_save_path, cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR))  # Convert back to BGR for saving
+            cv2.imwrite(thermal_save_path, thermal_image)
+
+        # Save the timestamp and label in the csv
+        label_list.append((sequence_name, label))
+
+        # Logging
+        print('participant id: ', pid, '; data split: ', data_split, '; data pid: ', data_pid,
+              '; label: ', label, '; index of videos: ', len(rgb_array))
 
 
+    # Save the timestamp and label in the csv
+    label_df = pd.DataFrame(label_list)
+    label_output_dir = os.path.join(output_dir, 'P' + str(pid), 'rgbt-mid-fusion-rtfnet', 'label')
+    os.makedirs(label_output_dir, exist_ok=True)
+    output_csv_path = os.path.join(label_output_dir, data_split + ".csv")
+    label_df.to_csv(output_csv_path, header=False, index=False)
 
+
+if __name__ == '__main__':
+    DIR_MAP = {
+        6: os.path.join("/ssd2", "behaviorsight", "data", "Wild", "P6", "output"),
+        7: os.path.join("/ssd2", "behaviorsight", "data", "Wild", "P7", "output"),
+        13: os.path.join("/ssd2", "behaviorsight", "data", "Wild", "P13", "output"),
+        14: os.path.join("/ssd2", "behaviorsight", "data", "R21-InWild", "P14", "output"),
+        15: os.path.join("/ssd2", "behaviorsight", "data", "R21-InWild", "P15", "output"),
+        16: os.path.join("/ssd2", "behaviorsight", "data", "R21-InWild", "P16"),
+        18: os.path.join("/ssd2", "behaviorsight", "data", "R21-InWild", "P18", "output"),
+        1: os.path.join("/ssd2", "behaviorsight", "data", "Wild", "P1", "output"),
+        2: os.path.join("/ssd2", "behaviorsight", "data", "R21-InWild", "P2", "output"),
+        5: os.path.join("/ssd2", "behaviorsight", "data", "Wild", "P5", "output"),
+        12: os.path.join("/ssd2", "behaviorsight", "data", "Wild", "P12", "output"),
+        11: os.path.join("/ssd2", "behaviorsight", "data", "Wild", "P11", "output"),
+        19: os.path.join("/ssd2", "behaviorsight", "data", "R21-InWild", "P19", "output"),
+    }
+
+    # # participant in batch
+    smoking_pids = [6, 7, 13, 14, 15, 16, 18]
+    data_splits = ['train', 'val', 'test']
+    # output_dir = '/home/meixi/data'
+    output_dir = '/ssd1/meixi/data'
+
+    tasks = []
+    for pid in smoking_pids:
+        input_csv = f"/ssd2/R21_Clips/loso-data--for12participants/P{pid}/multi-rgb_losoBalanced"
+        for data_split in data_splits:
+            tasks.append((pid, input_csv, output_dir, data_split))
+
+    with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
+        pool.starmap(process_data, tasks)
