@@ -5,7 +5,8 @@
 
 import torch
 import torch.nn as nn 
-import torchvision.models as models 
+import torchvision.models as models
+from torchvision.models import ResNet50_Weights, ResNet18_Weights
 import torch.nn.utils.rnn as rnn_utils
 
 
@@ -22,16 +23,18 @@ class RTFNet(nn.Module):
         self.num_resnet_layers = num_resnet_layers
 
         if self.num_resnet_layers == 18:
-            resnet_raw_model1 = models.resnet18(pretrained=True)
-            resnet_raw_model2 = models.resnet18(pretrained=True)
+            resnet_raw_model1 = models.resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+            resnet_raw_model2 = models.resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
             self.inplanes = 512
         elif self.num_resnet_layers == 34:
             resnet_raw_model1 = models.resnet34(pretrained=True)
             resnet_raw_model2 = models.resnet34(pretrained=True)
             self.inplanes = 512
         elif self.num_resnet_layers == 50:
-            resnet_raw_model1 = models.resnet50(pretrained=True)
-            resnet_raw_model2 = models.resnet50(pretrained=True)
+            # resnet_raw_model1 = models.resnet50(pretrained=True)
+            # resnet_raw_model2 = models.resnet50(pretrained=True)
+            resnet_raw_model1 = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
+            resnet_raw_model2 = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
             self.inplanes = 2048
         elif self.num_resnet_layers == 101:
             resnet_raw_model1 = models.resnet101(pretrained=True)
@@ -67,7 +70,7 @@ class RTFNet(nn.Module):
 
         # LSTM module
         self.lstm = nn.LSTM(input_size=self.inplanes, hidden_size=lstm_hidden_size, num_layers=num_lstm_layers, batch_first=True)
-
+        self.lstm.flatten_parameters()
         # Classifier
         self.classifier = nn.Linear(lstm_hidden_size, n_class)
 

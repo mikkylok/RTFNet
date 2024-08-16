@@ -91,6 +91,7 @@ def process_data(pid, input_csv, output_dir, data_split):
         label = row['label']
         start = int(clip_path.split('/')[-1].split('_')[0])
         end = int(clip_path.split('/')[-1].split('_')[1])
+        # if start == 1681811689600 and end == 1681811692200 and data_pid == 14:
 
         ts_df = pd.read_csv(os.path.join(DIR_MAP[data_pid], 'timestamps.csv'))
         # Get start and end frames
@@ -137,9 +138,8 @@ def process_data(pid, input_csv, output_dir, data_split):
             thermal_filename = os.path.splitext(thermal_filename)[0] + '.jpg'
             thermal_filenames.append(thermal_filename)  # Store the modified thermal filename
 
-
         image_output_dir = os.path.join(output_dir, 'P' + str(data_pid), 'rgbt-mid-fusion-rtfnet', 'image')
-        sequence_name = f"{start}_{end}_{len(rgb_array)}"
+        sequence_name = f"{start}_{end}"
         rgb_output_dir = os.path.join(image_output_dir, sequence_name, 'rgb')
         thermal_output_dir = os.path.join(image_output_dir, sequence_name, 'thermal')
         # Create the directories if they don't exist
@@ -155,18 +155,18 @@ def process_data(pid, input_csv, output_dir, data_split):
 
             rgb_save_path = os.path.join(rgb_output_dir, rgb_filename)
             thermal_save_path = os.path.join(thermal_output_dir, thermal_filename)
-            # print(len(rgb_array), idx, rgb_save_path, thermal_save_path)
-
+            print(len(rgb_array), idx, rgb_save_path, thermal_save_path)
+            # if thermal_save_path == '/ssd1/meixi/data/P14/rgbt-mid-fusion-rtfnet/image/1681811689600_1681811692200/thermal/1681811691400.jpg':
             # Save the RGB and thermal images
             cv2.imwrite(rgb_save_path, cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR))  # Convert back to BGR for saving
             cv2.imwrite(thermal_save_path, thermal_image)
 
+            # Logging
+            print('participant id: ', pid, '; data split: ', data_split, '; data pid: ', data_pid,
+                  '; label: ', label, '; index of videos: ', len(rgb_array))
+
         # Save the timestamp and label in the csv
         label_list.append((os.path.join(image_output_dir, sequence_name), label))
-
-        # Logging
-        print('participant id: ', pid, '; data split: ', data_split, '; data pid: ', data_pid,
-              '; label: ', label, '; index of videos: ', len(rgb_array))
 
     # Save the timestamp and label in the csv
     label_df = pd.DataFrame(label_list)

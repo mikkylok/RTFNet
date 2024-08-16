@@ -10,10 +10,16 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.utils.rnn as rnn_utils
 from torch.utils.data import DataLoader
+from torchvision import transforms
 
 from model.RTFNet import RTFNet
 from util.RGBTDataset import RGBThermalDataset
 
+
+import os
+
+# Set the environment variable
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 
 def set_random_seed(seed):
     torch.manual_seed(seed)
@@ -74,21 +80,24 @@ def train(model, train_loader, criterion, optimizer, device):
     total_loss = 0.0
 
     for batch_idx, (rgb_images, thermal_images, labels, lengths) in enumerate(train_loader):
-        optimizer.zero_grad()
-        rgb_images = rgb_images.to(device)
-        thermal_images = thermal_images.to(device)
-        labels = labels.to(device)
 
-        # Forward pass
-        outputs = model(rgb_images, thermal_images, lengths)
+        if rgb_images is not None and thermal_images is not None and labels is not None and lengths is not None:
+            optimizer.zero_grad()
+            rgb_images = rgb_images.to(device)
+            thermal_images = thermal_images.to(device)
+            labels = labels.to(device)
+            # Forward pass
+            outputs = model(rgb_images, thermal_images, lengths)
 
-        # Compute loss
-        loss = criterion(outputs, labels)
-        total_loss += loss.item()
+            # Compute loss
+            loss = criterion(outputs, labels)
+            x = loss.item()
+            total_loss += x
 
-        # Backward pass and optimization
-        loss.backward()
-        optimizer.step()
+            # Backward pass and optimization
+            loss.backward()
+            optimizer.step()
+            print (f"{batch_idx}/{len(train_loader)}: {x}")
 
     avg_loss = total_loss / len(train_loader)
     return avg_loss
@@ -152,7 +161,8 @@ def main(params, pid, mode='single_inference'):
     batch_size = params['batch_size']
     num_classes = 3
     num_workers = params['num_workers']
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device_ids = [1, 0, 2, 3]  # List of GPUs to use
+    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 
     # Initialize the model
     model = RTFNet(n_class=num_classes,
@@ -160,22 +170,29 @@ def main(params, pid, mode='single_inference'):
                    num_lstm_layers=params['num_lstm_layers'],
                    lstm_hidden_size=params['lstm_hidden_size'],
                    device=device)
+    # Wrap the model with DataParallel
+    model = nn.DataParallel(model, device_ids=device_ids)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=params['learning_rate'])
 
+
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),  # Convert the image to a PyTorch tensor
+    ])
     # Create datasets
     data_dir = params['data_dir']
-    train_dataset = RGBThermalDataset(data_dir=data_dir, pid=pid, split='train')
-    val_dataset = RGBThermalDataset(data_dir=data_dir, pid=pid, split='val')
-    test_dataset = RGBThermalDataset(data_dir=data_dir, pid=pid, split='test')
+    train_dataset = RGBThermalDataset(data_dir=data_dir, pid=pid, split='train', transform=transform)
+    val_dataset = RGBThermalDataset(data_dir=data_dir, pid=pid, split='val', transform=transform)
+    test_dataset = RGBThermalDataset(data_dir=data_dir, pid=pid, split='test', transform=transform)
 
     # Create dataloaders
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers,
-                              collate_fn=collate_fn)
+                              collate_fn=collate_fn, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
-                            collate_fn=collate_fn)
+                            collate_fn=collate_fn, pin_memory=True)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
-                             collate_fn=collate_fn)
+                             collate_fn=collate_fn, pin_memory=True)
 
     train_losses = []
     val_losses = []
@@ -186,7 +203,7 @@ def main(params, pid, mode='single_inference'):
     interval = max(params['num_epochs'] // 5, 1)  # Ensure at least 1
 
     for epoch in range(num_epochs):
-        print(f'Epoch {epoch + 1}/{num_epochs}')
+        # print(f'Epoch {epoch + 1}/{num_epochs}')
 
         # Train the model
         train_loss = train(model, train_loader, criterion, optimizer, device)
@@ -196,8 +213,9 @@ def main(params, pid, mode='single_inference'):
         val_loss = validate(model, val_loader, criterion, device)
         val_losses.append(val_loss)
 
-        if mode != 'grid_search' and (epoch + 1) % interval == 0:
-            print(f"P{pid}, Epoch {epoch + 1}/{params['num_epochs']}, Train Loss: {train_loss}, Validation Loss: {val_loss}")
+        print(f"P{pid}, Epoch {epoch + 1}/{params['num_epochs']}, Train Loss: {train_loss}, Validation Loss: {val_loss}")
+        # if mode != 'grid_search' and (epoch + 1) % interval == 0:
+        #     print(f"P{pid}, Epoch {epoch + 1}/{params['num_epochs']}, Train Loss: {train_loss}, Validation Loss: {val_loss}")
 
         # Early stopping
         if val_loss < best_val_loss:
@@ -240,6 +258,7 @@ def lopo_train(params):
         metrics_dict['recall'].append(round(recall, 4))
         metrics_dict['f1_score'].append(round(f1, 4))
         metrics_dict['accuracy'].append(round(accuracy, 4))
+        print(f"Precision: {round(precision, 4)}, Recall: {round(recall, 4)}, F1 score: {round(f1, 4)}, Accuracy: {round(accuracy, 4)}")
     metrics_df = pd.DataFrame(metrics_dict)
     metrics_df.set_index('participant_id', inplace=True)
     avg_metrics = metrics_df.mean().round(4).to_frame().T
@@ -251,13 +270,13 @@ def lopo_train(params):
 if __name__ == '__main__':
     params = {
         'num_workers': 4,  # For data loading
-        'num_resnet_layers': 50,
+        'num_resnet_layers': 18,
         'num_lstm_layers': 1,
-        'lstm_hidden_size': 512,
-        'num_epochs': 1000,
-        'batch_size': 512,
+        'lstm_hidden_size': 128,
+        'num_epochs': 10,
+        'batch_size': 1,
         'learning_rate': 0.00001,
-        'data_dir': "/home/meixi/data",
+        'data_dir': "/ssd1/meixi/data",
         'early_stop_patience': 5,
     }
     lopo_train(params)
