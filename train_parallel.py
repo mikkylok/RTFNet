@@ -1,3 +1,4 @@
+import time
 import random
 import numpy as np
 import pandas as pd
@@ -144,6 +145,7 @@ def train(rank, world_size, params, pid, output_dir):
     early_stop_count = 0
 
     for epoch in range(num_epochs):
+        start_time = time.time()  # Start time for the epoch
         train_sampler.set_epoch(epoch)  # Ensure all samples are used equally across all epochs
         model.train()
 
@@ -162,7 +164,7 @@ def train(rank, world_size, params, pid, output_dir):
             x = loss.item()
             train_loss += x
             # if num_batches > 100 and (batch_idx + 1) % 100 == 0:
-                # print(f'Batch {batch_idx + 1}/{num_batches}, Loss: {x}')
+            #     print(f'Pid {pid}, Rank {rank}, Batch {batch_idx + 1}/{num_batches}, Train Loss: {x}')
 
         train_loss /= len(train_loader)
         train_losses.append(train_loss)
@@ -182,17 +184,18 @@ def train(rank, world_size, params, pid, output_dir):
         val_loss /= len(val_loader)
         val_losses.append(val_loss)
 
-        print(f"Rank {rank}, Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss}, Validation Loss: {val_loss}")
+        epoch_time = (time.time() - start_time) / 60  # End time for the epoch and convert to minutes
+        print(f"Pid {pid}, Rank {rank + 1}, Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss}, Validation Loss: {val_loss}, Epoch Time: {epoch_time:.2f} minutes")
 
         # Early stopping
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            early_stop_count = 0
-        else:
-            early_stop_count += 1
-            if early_stop_count >= patience:
-                print(f"Rank {rank}, Early stopping triggered at epoch {epoch + 1}.")
-                break
+        # if val_loss < best_val_loss:
+        #     best_val_loss = val_loss
+        #     early_stop_count = 0
+        # else:
+        #     early_stop_count += 1
+        #     if early_stop_count >= patience:
+        #         print(f"Pid {pid}, Rank {rank + 1}, Early stopping triggered at epoch {epoch + 1}.")
+        #         break
 
     # Testing loop
     model.eval()
@@ -234,14 +237,14 @@ def lopo_train(params, world_size):
 if __name__ == '__main__':
     params = {
         'num_workers': 16,
-        'num_resnet_layers': 18,
-        'num_lstm_layers': 1,
-        'lstm_hidden_size': 128,
-        'num_epochs': 6,
-        'batch_size': 1,
-        'learning_rate': 0.00001,
+        'num_resnet_layers': 50,
+        'num_lstm_layers': 2,  # can be grid searched [1,2]
+        'lstm_hidden_size': 1024,  # can be grid searched [256, 512, 768, 1024] 1024 can fit with batch_size=5
+        'num_epochs': 15,
+        'batch_size': 5,   # when batch_size=3, resize can not be removed  # batch_size=5 when there is resize
+        'learning_rate': 0.00001,  # can be grid searched [0.00001, 0.000001]
         'data_dir': "/ssd1/meixi/data",
         'early_stop_patience': 5,
     }
-    world_size = 3  # Only use GPUs 2 and 3
+    world_size = 3  # Only use GPUs 1, 2 and 3
     lopo_train(params, world_size)

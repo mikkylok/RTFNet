@@ -6,8 +6,7 @@
 import torch
 import torch.nn as nn 
 import torchvision.models as models
-from torchvision.models import ResNet50_Weights, ResNet18_Weights
-import torch.nn.utils.rnn as rnn_utils
+from torchvision.models import ResNet18_Weights, ResNet34_Weights, ResNet50_Weights, ResNet101_Weights, ResNet152_Weights
 
 
 class RTFNet(nn.Module):
@@ -18,7 +17,7 @@ class RTFNet(nn.Module):
                  lstm_hidden_size=512,
                  device=torch.device('cuda:0')):
         super(RTFNet, self).__init__()
-        self.device = device  # Assign the device
+        self.device = device
 
         self.num_resnet_layers = num_resnet_layers
 
@@ -27,28 +26,27 @@ class RTFNet(nn.Module):
             resnet_raw_model2 = models.resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
             self.inplanes = 512
         elif self.num_resnet_layers == 34:
-            resnet_raw_model1 = models.resnet34(pretrained=True)
-            resnet_raw_model2 = models.resnet34(pretrained=True)
+            resnet_raw_model1 = models.resnet34(weights=ResNet34_Weights.IMAGENET1K_V1)
+            resnet_raw_model2 = models.resnet34(weights=ResNet34_Weights.IMAGENET1K_V1)
             self.inplanes = 512
         elif self.num_resnet_layers == 50:
-            # resnet_raw_model1 = models.resnet50(pretrained=True)
-            # resnet_raw_model2 = models.resnet50(pretrained=True)
             resnet_raw_model1 = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
             resnet_raw_model2 = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
             self.inplanes = 2048
         elif self.num_resnet_layers == 101:
-            resnet_raw_model1 = models.resnet101(pretrained=True)
-            resnet_raw_model2 = models.resnet101(pretrained=True)
+            resnet_raw_model1 = models.resnet101(weights=ResNet101_Weights.IMAGENET1K_V1)
+            resnet_raw_model2 = models.resnet101(weights=ResNet101_Weights.IMAGENET1K_V1)
             self.inplanes = 2048
         elif self.num_resnet_layers == 152:
-            resnet_raw_model1 = models.resnet152(pretrained=True)
-            resnet_raw_model2 = models.resnet152(pretrained=True)
+            resnet_raw_model1 = models.resnet152(weights=ResNet152_Weights.IMAGENET1K_V1)
+            resnet_raw_model2 = models.resnet152(weights=ResNet152_Weights.IMAGENET1K_V1)
             self.inplanes = 2048
 
         ########  Thermal ENCODER  ########
- 
-        self.encoder_thermal_conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False) 
-        self.encoder_thermal_conv1.weight.data = torch.unsqueeze(torch.mean(resnet_raw_model1.conv1.weight.data, dim=1), dim=1)
+
+        self.encoder_thermal_conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.encoder_thermal_conv1.weight.data = torch.unsqueeze(torch.mean(resnet_raw_model1.conv1.weight.data, dim=1),
+                                                                 dim=1)
         self.encoder_thermal_bn1 = resnet_raw_model1.bn1
         self.encoder_thermal_relu = resnet_raw_model1.relu
         self.encoder_thermal_maxpool = resnet_raw_model1.maxpool
@@ -58,7 +56,7 @@ class RTFNet(nn.Module):
         self.encoder_thermal_layer4 = resnet_raw_model1.layer4
 
         ########  RGB ENCODER  ########
- 
+
         self.encoder_rgb_conv1 = resnet_raw_model2.conv1
         self.encoder_rgb_bn1 = resnet_raw_model2.bn1
         self.encoder_rgb_relu = resnet_raw_model2.relu
@@ -69,8 +67,10 @@ class RTFNet(nn.Module):
         self.encoder_rgb_layer4 = resnet_raw_model2.layer4
 
         # LSTM module
-        self.lstm = nn.LSTM(input_size=self.inplanes, hidden_size=lstm_hidden_size, num_layers=num_lstm_layers, batch_first=True)
+        self.lstm = nn.LSTM(input_size=self.inplanes, hidden_size=lstm_hidden_size, num_layers=num_lstm_layers,
+                            batch_first=True)
         self.lstm.flatten_parameters()
+
         # Classifier
         self.classifier = nn.Linear(lstm_hidden_size, n_class)
 
@@ -130,16 +130,10 @@ class RTFNet(nn.Module):
         # Stack the features along the time dimension
         features = torch.stack(features, dim=1)  # shape (batch, frames, features)
 
-        # Pack the sequences
-        packed_features = rnn_utils.pack_padded_sequence(features, lengths, batch_first=True, enforce_sorted=False)
-
-        # packed_lstm_out, _ = self.lstm(packed_features)
-        # lstm_out, _ = rnn_utils.pad_packed_sequence(packed_lstm_out, batch_first=True)
-        # output = self.classifier(lstm_out[:, -1, :])
-
-        packed_lstm_out, (hn, _) = self.lstm(packed_features)
+        # Pass the stacked features through the LSTM
+        lstm_out, (hn, _) = self.lstm(features)
         final_output = hn[-1]  # Take the last hidden state
-        output = self.classifier(final_output)  # Pass through the classifier
+        output = self.classifier(final_output)
 
         return output
 
@@ -171,7 +165,7 @@ def unit_test():
     try:
         output = rtf_net(rgb, thermal, lengths)
         print(output)
-        print(output.shape)  # Should print the shape of the output
+        print(output.shape)
     except RuntimeError as e:
         print("RuntimeError:", e)
         print("CUDA_LAUNCH_BLOCKING set to 1 for debugging")
