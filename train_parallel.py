@@ -275,11 +275,11 @@ if __name__ == '__main__':
     params = {
         'num_workers': 16,
         'num_resnet_layers': 50,
-        'num_lstm_layers': 2,  # can be grid searched [1,2] trying
+        'num_lstm_layers': 1,  # can be grid searched [1,2] trying
         'lstm_hidden_size': 1024,  # can be grid searched [256, 512, 768, 1024] 1024 can fit with batch_size=5
         'num_epochs': 15,
         'batch_size': 5,   # when batch_size=3, resize can not be removed  # batch_size=5 when there is resize
-        'learning_rate': 0.00001,  # can be grid searched [0.00001, 0.000001]
+        'learning_rate': 0.005,  # can be grid searched [0.00001, 0.000001]
         'data_dir': "/ssd1/meixi/data",
         'early_stop_patience': 5,
         'momentum': 0.9,
