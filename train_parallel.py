@@ -22,6 +22,9 @@ import os
 
 # Set the environment variable
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
+BASE_LR = 0.005
+STEPS = [0, 11, 14]
+LRS = [1, 0.1, 0.01]
 
 
 def setup(rank, world_size):
@@ -87,6 +90,30 @@ def plot_confusion_matrix(labels, preds, class_names, pid, output_dir):
     plt.close()
 
 
+def get_lr_at_epoch(cur_epoch, max_epoch):
+    """
+    Retrieves the lr step index for the given epoch.
+    Args:
+        cur_epoch (float): the number of epoch of the current training stage.
+    """
+    lr_steps = STEPS + [max_epoch]
+    for ind, step in enumerate(lr_steps):
+        if cur_epoch < step:
+            break
+    return LRS[ind - 1] * BASE_LR
+
+
+def set_lr(optimizer, new_lr):
+    """
+    Sets the optimizer lr to the specified value.
+    Args:
+        optimizer (optim): the optimizer using to optimize the current network.
+        new_lr (float): the new learning rate to set.
+    """
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = new_lr
+
+
 def train(rank, world_size, params, pid, output_dir):
     setup(rank, world_size)
 
@@ -113,7 +140,15 @@ def train(rank, world_size, params, pid, output_dir):
 
     # Criterion and Optimizer
     criterion = nn.CrossEntropyLoss().to(device)
-    optimizer = optim.Adam(model.parameters(), lr=params['learning_rate'])
+    # optimizer = optim.Adam(model.parameters(), lr=params['learning_rate'])
+    optimizer = optim.SGD(
+        model.parameters(),
+        lr=params['learning_rate'],
+        momentum=params['momentum'],
+        weight_decay=params['weight_decay'],
+        dampening=params['dampening'],
+        nesterov=params['nesterov'],
+    )
 
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -140,12 +175,14 @@ def train(rank, world_size, params, pid, output_dir):
 
     train_losses = []
     val_losses = []
-    best_val_loss = float('inf')
-    patience = params['early_stop_patience']
-    early_stop_count = 0
+    # best_val_loss = float('inf')
+    # patience = params['early_stop_patience']
+    # early_stop_count = 0
 
     for epoch in range(num_epochs):
-        start_time = time.time()  # Start time for the epoch
+        new_lr = get_lr_at_epoch(epoch, num_epochs)
+        set_lr(optimizer, new_lr)
+        start_time = time.time()
         train_sampler.set_epoch(epoch)  # Ensure all samples are used equally across all epochs
         model.train()
 
@@ -184,8 +221,8 @@ def train(rank, world_size, params, pid, output_dir):
         val_loss /= len(val_loader)
         val_losses.append(val_loss)
 
-        epoch_time = (time.time() - start_time) / 60  # End time for the epoch and convert to minutes
-        print(f"Pid {pid}, Rank {rank + 1}, Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss}, Validation Loss: {val_loss}, Epoch Time: {epoch_time:.2f} minutes")
+        epoch_time = (time.time() - start_time) / 60
+        print(f"Pid {pid}, Rank {rank + 1}, Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss}, Validation Loss: {val_loss}, Epoch Time: {epoch_time:.2f} minutes, Learning rate: {optimizer.param_groups[0]['lr']}")
 
         # Early stopping
         # if val_loss < best_val_loss:
@@ -238,13 +275,17 @@ if __name__ == '__main__':
     params = {
         'num_workers': 16,
         'num_resnet_layers': 50,
-        'num_lstm_layers': 2,  # can be grid searched [1,2]
+        'num_lstm_layers': 2,  # can be grid searched [1,2] trying
         'lstm_hidden_size': 1024,  # can be grid searched [256, 512, 768, 1024] 1024 can fit with batch_size=5
         'num_epochs': 15,
         'batch_size': 5,   # when batch_size=3, resize can not be removed  # batch_size=5 when there is resize
         'learning_rate': 0.00001,  # can be grid searched [0.00001, 0.000001]
         'data_dir': "/ssd1/meixi/data",
         'early_stop_patience': 5,
+        'momentum': 0.9,
+        'weight_decay': 1e-4,
+        'dampening': 0,
+        'nesterov': True,
     }
     world_size = 3  # Only use GPUs 1, 2 and 3
     lopo_train(params, world_size)
