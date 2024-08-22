@@ -66,6 +66,12 @@ class RTFNet(nn.Module):
         self.encoder_rgb_layer3 = resnet_raw_model2.layer3
         self.encoder_rgb_layer4 = resnet_raw_model2.layer4
 
+        # Simplified Attention mechanism: Single Linear Layer
+        self.attention_fc = nn.Linear(self.inplanes * 2, 2)
+
+        # Global average pooling layer
+        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+
         # LSTM module
         self.lstm = nn.LSTM(input_size=self.inplanes, hidden_size=lstm_hidden_size, num_layers=num_lstm_layers,
                             batch_first=True)
@@ -96,7 +102,15 @@ class RTFNet(nn.Module):
             thermal = self.encoder_thermal_bn1(thermal)
             thermal = self.encoder_thermal_relu(thermal)
 
-            rgb = rgb + thermal
+            # Combine global features from RGB and thermal for attention calculation
+            rgb_global = self.global_avg_pool(rgb).view(rgb.size(0), -1)  # Global avg pool and flatten
+            thermal_global = self.global_avg_pool(thermal).view(thermal.size(0), -1)
+
+            combined_features = torch.cat((rgb_global, thermal_global), dim=1)  # Concatenate along feature dimension
+            attention_weights = torch.sigmoid(self.attention_fc(combined_features))  # Compute attention weights
+            rgb_weight, thermal_weight = attention_weights[:, 0].view(-1, 1, 1, 1), attention_weights[:, 1].view(-1, 1, 1, 1)
+
+            rgb = rgb_weight * rgb + thermal_weight * thermal
 
             rgb = self.encoder_rgb_maxpool(rgb)
             thermal = self.encoder_thermal_maxpool(thermal)
@@ -104,25 +118,25 @@ class RTFNet(nn.Module):
             rgb = self.encoder_rgb_layer1(rgb)
             thermal = self.encoder_thermal_layer1(thermal)
 
-            rgb = rgb + thermal
+            rgb = rgb_weight * rgb + thermal_weight * thermal
 
             rgb = self.encoder_rgb_layer2(rgb)
             thermal = self.encoder_thermal_layer2(thermal)
 
-            rgb = rgb + thermal
+            rgb = rgb_weight * rgb + thermal_weight * thermal
 
             rgb = self.encoder_rgb_layer3(rgb)
             thermal = self.encoder_thermal_layer3(thermal)
 
-            rgb = rgb + thermal
+            rgb = rgb_weight * rgb + thermal_weight * thermal
 
             rgb = self.encoder_rgb_layer4(rgb)
             thermal = self.encoder_thermal_layer4(thermal)
 
-            fuse = rgb + thermal
+            fuse = rgb_weight * rgb + thermal_weight * thermal
 
             # Global Average Pooling
-            fuse = nn.AdaptiveAvgPool2d((1, 1))(fuse)
+            fuse = self.global_avg_pool(fuse)
             fuse = fuse.view(fuse.size(0), -1)  # Flatten
 
             features.append(fuse)
