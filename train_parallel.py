@@ -150,16 +150,13 @@ def train(rank, world_size, params, pid, output_dir):
         nesterov=params['nesterov'],
     )
 
-    transform = transforms.Compose([
-        # transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-    ])
+    transform = 'resize'  # resize or crop
 
     # Create datasets and Distributed Sampler
     data_dir = params['data_dir']
-    train_dataset = RGBThermalDataset(data_dir=data_dir, pid=pid, split='train', transform=transform)
-    val_dataset = RGBThermalDataset(data_dir=data_dir, pid=pid, split='val', transform=transform)
-    test_dataset = RGBThermalDataset(data_dir=data_dir, pid=pid, split='test', transform=transform)
+    train_dataset = RGBThermalDataset(data_dir=data_dir, pid=pid, split='train', transform=transform, input_h=224, input_w=224)
+    val_dataset = RGBThermalDataset(data_dir=data_dir, pid=pid, split='val', transform=transform, input_h=224, input_w=224)
+    test_dataset = RGBThermalDataset(data_dir=data_dir, pid=pid, split='test', transform=transform, input_h=224, input_w=224)
 
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
