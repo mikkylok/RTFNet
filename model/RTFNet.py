@@ -67,7 +67,7 @@ class RTFNet(nn.Module):
         self.encoder_rgb_layer4 = resnet_raw_model2.layer4
 
         # Simplified Attention mechanism: Single Linear Layer
-        self.attention_fc = nn.Linear(self.inplanes * 2, 2)
+        self.attention_fc = nn.Linear(128, 2)
 
         # Global average pooling layer
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))

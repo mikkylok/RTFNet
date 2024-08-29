@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, accuracy_score, precision_recall_fscore_support
 
 import torch
+import torchprofile
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.utils.rnn as rnn_utils
@@ -239,10 +240,16 @@ def train(rank, world_size, params, pid, output_dir):
     all_labels = []
     all_preds = []
     with torch.no_grad():
-        for rgb_images, thermal_images, labels, lengths in test_loader:
+        for batch_idx, (rgb_images, thermal_images, labels, lengths) in enumerate(test_loader):
             rgb_images = rgb_images.to(device)
             thermal_images = thermal_images.to(device)
             labels = labels.to(device)
+
+            # Calculate FLOPs for the first batch
+            if batch_idx == 0 and rank == 0:
+                flops = torchprofile.profile_macs(model, args=(rgb_images, thermal_images, lengths))
+                print(f"Estimated FLOPs for the model: {flops * 2} FLOPs")
+
             outputs = model(rgb_images, thermal_images, lengths)
             _, preds = torch.max(outputs, 1)
             all_labels.extend(labels.cpu().numpy())
@@ -277,7 +284,7 @@ if __name__ == '__main__':
         'num_resnet_layers': 50,
         'num_lstm_layers': 1,  # can be grid searched [1,2] trying
         'lstm_hidden_size': 1024,  # can be grid searched [256, 512, 768, 1024] 1024 can fit with batch_size=5
-        'num_epochs': 15,
+        'num_epochs': 1,
         'batch_size': 5,   # when batch_size=3, resize can not be removed  # batch_size=5 when there is resize
         'learning_rate': 0.005,  # can be grid searched [0.00001, 0.000001]
         'data_dir': "/ssd1/meixi/data",
