@@ -110,7 +110,7 @@ class RTFNet(nn.Module):
             attention_weights = torch.sigmoid(self.attention_fc(combined_features))  # Compute attention weights
             rgb_weight, thermal_weight = attention_weights[:, 0].view(-1, 1, 1, 1), attention_weights[:, 1].view(-1, 1, 1, 1)
 
-            rgb = rgb_weight * rgb + thermal_weight * thermal
+            rgb = rgb + thermal
 
             rgb = self.encoder_rgb_maxpool(rgb)
             thermal = self.encoder_thermal_maxpool(thermal)
@@ -118,17 +118,17 @@ class RTFNet(nn.Module):
             rgb = self.encoder_rgb_layer1(rgb)
             thermal = self.encoder_thermal_layer1(thermal)
 
-            rgb = rgb_weight * rgb + thermal_weight * thermal
+            rgb = rgb + thermal
 
             rgb = self.encoder_rgb_layer2(rgb)
             thermal = self.encoder_thermal_layer2(thermal)
 
-            rgb = rgb_weight * rgb + thermal_weight * thermal
+            rgb = rgb + thermal
 
             rgb = self.encoder_rgb_layer3(rgb)
             thermal = self.encoder_thermal_layer3(thermal)
 
-            rgb = rgb_weight * rgb + thermal_weight * thermal
+            rgb = rgb + thermal
 
             rgb = self.encoder_rgb_layer4(rgb)
             thermal = self.encoder_thermal_layer4(thermal)
