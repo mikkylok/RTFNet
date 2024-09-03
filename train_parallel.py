@@ -7,7 +7,6 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, accuracy_score, precision_recall_fscore_support
 
 import torch
-import torchprofile
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.utils.rnn as rnn_utils
@@ -16,6 +15,7 @@ from torchvision import transforms
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
+from fvcore.nn import FlopCountAnalysis
 
 from model.RTFNet import RTFNet
 from util.RGBTDataset import RGBThermalDataset
@@ -247,8 +247,9 @@ def train(rank, world_size, params, pid, output_dir):
 
             # Calculate FLOPs for the first batch
             if batch_idx == 0 and rank == 0:
-                flops = torchprofile.profile_macs(model, args=(rgb_images, thermal_images, lengths))
-                print(f"Estimated FLOPs for the model: {flops * 2} FLOPs")
+                flops = FlopCountAnalysis(model, (rgb_images, thermal_images, lengths))
+                tflops = flops.total() / 1e12  # Convert FLOPs to TFLOPs
+                print(f"Estimated TFLOPs for a single forward pass: {tflops:.6f} TFLOPs")
 
             outputs = model(rgb_images, thermal_images, lengths)
             _, preds = torch.max(outputs, 1)
