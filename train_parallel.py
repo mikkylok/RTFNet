@@ -52,7 +52,7 @@ def seed_worker(worker_id):
 
 
 def collate_fn(batch):
-    rgb_images, thermal_images, labels, timestamps = zip(*batch)
+    rgb_images, thermal_images, labels, timestamps, rgb_dir, thermal_dir = zip(*batch)
 
     # Find sequence lengths
     lengths = [len(seq) for seq in rgb_images]
@@ -64,7 +64,7 @@ def collate_fn(batch):
     # Stack labels
     labels = torch.stack(labels)
 
-    return rgb_images, thermal_images, labels, lengths
+    return rgb_images, thermal_images, labels, lengths, rgb_dir, thermal_dir
 
 
 def plot_loss_curves(train_losses, val_losses, pid, output_dir):
@@ -113,6 +113,10 @@ def set_lr(optimizer, new_lr):
     """
     for param_group in optimizer.param_groups:
         param_group["lr"] = new_lr
+
+
+def save_checkpoint(state, filename='checkpoint.pth.tar'):
+    torch.save(state, filename)
 
 
 def train(rank, world_size, params, pid, output_dir):
@@ -176,7 +180,9 @@ def train(rank, world_size, params, pid, output_dir):
 
     train_losses = []
     val_losses = []
-    # best_val_loss = float('inf')
+    best_val_loss = float('inf')
+    best_checkpoint_path = None
+    final_checkpoint_path = None
     # patience = params['early_stop_patience']
     # early_stop_count = 0
 
@@ -190,12 +196,12 @@ def train(rank, world_size, params, pid, output_dir):
         # Training loop
         train_loss = 0.0
         num_batches = len(train_loader)
-        for batch_idx, (rgb_images, thermal_images, labels, lengths) in enumerate(train_loader):
+        for batch_idx, (rgb_images, thermal_images, labels, lengths, rgb_dirs, thermal_dirs) in enumerate(train_loader):
             optimizer.zero_grad()
             rgb_images = rgb_images.to(device)
             thermal_images = thermal_images.to(device)
             labels = labels.to(device)
-            outputs = model(rgb_images, thermal_images, lengths)
+            outputs, _, _ = model(rgb_images, thermal_images, lengths)
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
@@ -211,11 +217,11 @@ def train(rank, world_size, params, pid, output_dir):
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for rgb_images, thermal_images, labels, lengths in val_loader:
+            for rgb_images, thermal_images, labels, lengths, rgb_dirs, thermal_dirs in val_loader:
                 rgb_images = rgb_images.to(device)
                 thermal_images = thermal_images.to(device)
                 labels = labels.to(device)
-                outputs = model(rgb_images, thermal_images, lengths)
+                outputs, _, _ = model(rgb_images, thermal_images, lengths)
                 loss = criterion(outputs, labels)
                 val_loss += loss.item()
 
@@ -224,6 +230,22 @@ def train(rank, world_size, params, pid, output_dir):
 
         epoch_time = (time.time() - start_time) / 60
         print(f"Pid {pid}, Rank {rank + 1}, Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss}, Validation Loss: {val_loss}, Epoch Time: {epoch_time:.2f} minutes, Learning rate: {optimizer.param_groups[0]['lr']}")
+
+        # Save the best model checkpoint after each epoch
+        if rank == 0:  # Save only from rank 0 to avoid multiple saves
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                # Delete the previous best checkpoint if it exists
+                if best_checkpoint_path is not None and os.path.exists(best_checkpoint_path):
+                    os.remove(best_checkpoint_path)
+                # Save the new best model
+                best_checkpoint_path = os.path.join(output_dir, f"P{pid}_best_checkpoint_epoch_{epoch + 1}.pth.tar")
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'state_dict': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'best_val_loss': best_val_loss,
+                }, filename=best_checkpoint_path)
 
         # Early stopping
         # if val_loss < best_val_loss:
@@ -235,29 +257,67 @@ def train(rank, world_size, params, pid, output_dir):
         #         print(f"Pid {pid}, Rank {rank + 1}, Early stopping triggered at epoch {epoch + 1}.")
         #         break
 
-    # Testing loop
-    model.eval()
-    all_labels = []
-    all_preds = []
-    with torch.no_grad():
-        for batch_idx, (rgb_images, thermal_images, labels, lengths) in enumerate(test_loader):
-            rgb_images = rgb_images.to(device)
-            thermal_images = thermal_images.to(device)
-            labels = labels.to(device)
-
-            # Calculate FLOPs for the first batch
-            if batch_idx == 0 and rank == 0:
-                flops = FlopCountAnalysis(model, (rgb_images, thermal_images, lengths))
-                tflops = flops.total() / 1e12  # Convert FLOPs to TFLOPs
-                print(f"Estimated TFLOPs for a single forward pass: {tflops:.6f} TFLOPs")
-
-            outputs = model(rgb_images, thermal_images, lengths)
-            _, preds = torch.max(outputs, 1)
-            all_labels.extend(labels.cpu().numpy())
-            all_preds.extend(preds.cpu().numpy())
-
-    # Only rank 0 saves the plots and prints the test results
+    # Save final checkpoint after training finishes
     if rank == 0:
+        final_checkpoint_path = os.path.join(output_dir, f"P{pid}_final_checkpoint.pth.tar")
+        final_checkpoint = {
+            'epoch': num_epochs,
+            'state_dict': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'best_val_loss': best_val_loss,
+        }
+        save_checkpoint(final_checkpoint, filename=final_checkpoint_path)
+
+    # Testing loop
+    if rank == 0:
+        # Load the best validation checkpoint
+        if best_checkpoint_path is not None and os.path.exists(best_checkpoint_path):
+            checkpoint = torch.load(best_checkpoint_path, map_location=device)
+            model.load_state_dict(checkpoint['state_dict'])
+            print(f"Loaded best checkpoint from epoch {checkpoint['epoch']} with validation loss: {checkpoint['best_val_loss']}")
+        else:
+            print("Best checkpoint not found, using the final model.")
+
+        model.eval()
+        all_labels = []
+        all_preds = []
+        results = []  # To store all results for saving in CSV
+        with torch.no_grad():
+            for batch_idx, (rgb_images, thermal_images, labels, lengths, rgb_dirs, thermal_dirs) in enumerate(test_loader):
+                rgb_images = rgb_images.to(device)
+                thermal_images = thermal_images.to(device)
+                labels = labels.to(device)
+
+                # Calculate FLOPs for the first batch
+                if batch_idx == 0:
+                    flops = FlopCountAnalysis(model, (rgb_images, thermal_images, lengths))
+                    tflops = flops.total() / 1e12  # Convert FLOPs to TFLOPs
+                    print(f"Estimated TFLOPs for a single forward pass: {tflops:.6f} TFLOPs")
+
+                outputs, rgb_weights, thermal_weights = model(rgb_images, thermal_images, lengths)
+                probs = torch.softmax(outputs, dim=1)
+                _, preds = torch.max(outputs, 1)
+
+                # Append to the results for each video clip
+                for i in range(len(labels)):
+                    result = {
+                        'rgb_video_path': rgb_dirs[i],
+                        'thermal_video_path': thermal_dirs[i],
+                        'true_label': labels[i].cpu().item(),
+                        'prediction': preds[i].cpu().item(),
+                        'prob_max': probs[i].max().cpu().item(),
+                        'prob_0': probs[i][0].cpu().item(),
+                        'prob_1': probs[i][1].cpu().item(),
+                        'prob_2': probs[i][2].cpu().item(),
+                        'rgb_weight': rgb_weights[i].mean().cpu().item(),  # Assuming you want the mean weight
+                        'thermal_weight': thermal_weights[i].mean().cpu().item()  # Assuming you want the mean weight
+                    }
+                    results.append(result)
+
+                all_labels.extend(labels.cpu().numpy())
+                all_preds.extend(preds.cpu().numpy())
+
+        # Only rank 0 saves the plots and prints the test results
         plot_loss_curves(train_losses, val_losses, pid, output_dir)
         class_names = ['Negative', 'Smoking', 'Eating']
         plot_confusion_matrix(all_labels, all_preds, class_names, pid, output_dir)
@@ -267,13 +327,16 @@ def train(rank, world_size, params, pid, output_dir):
         precision, recall, f1, _ = precision_recall_fscore_support(all_labels, all_preds, average='weighted')
         print(f"Test Results for P{pid}:, Accuracy: {accuracy:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1 Score: {f1:.4f}")
 
+        # Convert results to a DataFrame
+        df = pd.DataFrame(results)
+        csv_file_path = os.path.join(output_dir, f"P{pid}_label_pred_prob.csv")
+        df.to_csv(csv_file_path, index=False)
+
     # Cleanup
     dist.destroy_process_group()
 
 
-def lopo_train(params, world_size):
-    participant_pids = [6, 7, 13, 14, 15, 16, 18]
-    output_dir = "."  # Set your desired output directory here
+def lopo_train(params, world_size, participant_pids, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     for pid in participant_pids:
         mp.spawn(train, args=(world_size, params, pid, output_dir), nprocs=world_size, join=True)
@@ -285,10 +348,10 @@ if __name__ == '__main__':
         'num_resnet_layers': 50,
         'num_lstm_layers': 1,  # can be grid searched [1,2] trying
         'lstm_hidden_size': 1024,  # can be grid searched [256, 512, 768, 1024] 1024 can fit with batch_size=5
-        'num_epochs': 1,
+        'num_epochs': 15,
         'batch_size': 5,   # when batch_size=3, resize can not be removed  # batch_size=5 when there is resize
         'learning_rate': 0.005,  # can be grid searched [0.00001, 0.000001]
-        'data_dir': "/ssd1/meixi/data",
+        'data_dir': "/home/meixi/data",
         'early_stop_patience': 5,
         'momentum': 0.9,
         'weight_decay': 1e-4,
@@ -296,4 +359,6 @@ if __name__ == '__main__':
         'nesterov': True,
     }
     world_size = 3  # Only use GPUs 1, 2 and 3
-    lopo_train(params, world_size)
+    output_dir = "/home/meixi/mid_fusion/rtfnet/output/no_attention_late_fusion_no_skip_connection"
+    participant_pids = [6, 7, 13, 14, 15, 16, 18]
+    lopo_train(params, world_size, participant_pids, output_dir)

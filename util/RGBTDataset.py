@@ -75,7 +75,7 @@ class RGBThermalDataset(Dataset):
         rgb_images = self.read_image(rgb_dir, 'rgb')
         thermal_images = self.read_image(thermal_dir, 'thermal')
 
-        return rgb_images, thermal_images, torch.tensor(label), str(timestamp)
+        return rgb_images, thermal_images, torch.tensor(label), str(timestamp), rgb_dir, thermal_dir
 
     def __len__(self):
         return len(self.labels_df)
