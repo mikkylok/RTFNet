@@ -1,118 +1,20 @@
+import os
 import time
-import random
-import numpy as np
 import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plt
-from sklearn.metrics import confusion_matrix, accuracy_score, precision_recall_fscore_support
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.utils.rnn as rnn_utils
-from torch.utils.data import DataLoader, DistributedSampler
-from torchvision import transforms
-import torch.distributed as dist
 import torch.multiprocessing as mp
+from torch.utils.data import DataLoader, DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
-from fvcore.nn import FlopCountAnalysis
+from torchvision import transforms
 
 from model.RTFNet import RTFNet
 from util.RGBTDataset import RGBThermalDataset
-import os
-
-# Set the environment variable
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
-BASE_LR = 0.005
-STEPS = [0, 11, 14]
-LRS = [1, 0.1, 0.01]
-
-
-def setup(rank, world_size):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-
-
-def set_random_seed(seed):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    np.random.seed(seed)
-    random.seed(seed)
-
-
-def seed_worker(worker_id):
-    worker_seed = torch.initial_seed() % 2 ** 32
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
-
-
-def collate_fn(batch):
-    rgb_images, thermal_images, labels, timestamps, rgb_dir, thermal_dir = zip(*batch)
-
-    # Find sequence lengths
-    lengths = [len(seq) for seq in rgb_images]
-
-    # Pad sequences
-    rgb_images = rnn_utils.pad_sequence(rgb_images, batch_first=True)
-    thermal_images = rnn_utils.pad_sequence(thermal_images, batch_first=True)
-
-    # Stack labels
-    labels = torch.stack(labels)
-
-    return rgb_images, thermal_images, labels, lengths, rgb_dir, thermal_dir
-
-
-def plot_loss_curves(train_losses, val_losses, pid, output_dir):
-    plt.figure(figsize=(10, 5))
-    plt.plot(train_losses, label='Training Loss')
-    plt.plot(val_losses, label='Validation Loss')
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
-    plt.title(f"P{pid}: Training and Validation Loss Curves")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(os.path.join(output_dir, f"P{pid}_loss_plot.png"))
-    plt.close()
-
-
-def plot_confusion_matrix(labels, preds, class_names, pid, output_dir):
-    cm = confusion_matrix(labels, preds)
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
-    plt.xlabel('Predicted')
-    plt.ylabel('True')
-    plt.title(f'P{pid} Confusion Matrix')
-    plt.savefig(os.path.join(output_dir, f"P{pid}_confusion_matrix.png"))
-    plt.close()
-
-
-def get_lr_at_epoch(cur_epoch, max_epoch):
-    """
-    Retrieves the lr step index for the given epoch.
-    Args:
-        cur_epoch (float): the number of epoch of the current training stage.
-    """
-    lr_steps = STEPS + [max_epoch]
-    for ind, step in enumerate(lr_steps):
-        if cur_epoch < step:
-            break
-    return LRS[ind - 1] * BASE_LR
-
-
-def set_lr(optimizer, new_lr):
-    """
-    Sets the optimizer lr to the specified value.
-    Args:
-        optimizer (optim): the optimizer using to optimize the current network.
-        new_lr (float): the new learning rate to set.
-    """
-    for param_group in optimizer.param_groups:
-        param_group["lr"] = new_lr
+from util.tools import setup, set_random_seed, collate_fn, get_lr_at_epoch, set_lr
+from test import test_loop
 
 
 def save_checkpoint(state, filename='checkpoint.pth.tar'):
@@ -131,7 +33,7 @@ def train(rank, world_size, params, pid, output_dir):
     num_workers = params['num_workers']
 
     # Map the rank to the correct GPU (2 or 3)
-    device = torch.device(f'cuda:{rank + 1}')
+    device = torch.device(f'cuda:{rank}')
 
     # Initialize the model and move it to the current device
     model = RTFNet(n_class=num_classes,
@@ -141,11 +43,10 @@ def train(rank, world_size, params, pid, output_dir):
                    device=device).to(device)
 
     # Wrap the model with DDP
-    model = DDP(model, device_ids=[rank + 1])
+    model = DDP(model, device_ids=[rank])
 
     # Criterion and Optimizer
     criterion = nn.CrossEntropyLoss().to(device)
-    # optimizer = optim.Adam(model.parameters(), lr=params['learning_rate'])
     optimizer = optim.SGD(
         model.parameters(),
         lr=params['learning_rate'],
@@ -182,9 +83,6 @@ def train(rank, world_size, params, pid, output_dir):
     val_losses = []
     best_val_loss = float('inf')
     best_checkpoint_path = None
-    final_checkpoint_path = None
-    # patience = params['early_stop_patience']
-    # early_stop_count = 0
 
     for epoch in range(num_epochs):
         new_lr = get_lr_at_epoch(epoch, num_epochs)
@@ -229,16 +127,14 @@ def train(rank, world_size, params, pid, output_dir):
         val_losses.append(val_loss)
 
         epoch_time = (time.time() - start_time) / 60
-        print(f"Pid {pid}, Rank {rank + 1}, Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss}, Validation Loss: {val_loss}, Epoch Time: {epoch_time:.2f} minutes, Learning rate: {optimizer.param_groups[0]['lr']}")
+        print(f"Pid {pid}, Rank {rank}, Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss}, Validation Loss: {val_loss}, Epoch Time: {epoch_time:.2f} minutes, Learning rate: {optimizer.param_groups[0]['lr']}", flush=True)
 
-        # Save the best model checkpoint after each epoch
-        if rank == 0:  # Save only from rank 0 to avoid multiple saves
+        # Save the best model checkpoint after each epoch, Save only from rank 0 to avoid multiple saves
+        if rank == 0:
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                # Delete the previous best checkpoint if it exists
                 if best_checkpoint_path is not None and os.path.exists(best_checkpoint_path):
                     os.remove(best_checkpoint_path)
-                # Save the new best model
                 best_checkpoint_path = os.path.join(output_dir, f"P{pid}_best_checkpoint_epoch_{epoch + 1}.pth.tar")
                 save_checkpoint({
                     'epoch': epoch + 1,
@@ -246,16 +142,6 @@ def train(rank, world_size, params, pid, output_dir):
                     'optimizer': optimizer.state_dict(),
                     'best_val_loss': best_val_loss,
                 }, filename=best_checkpoint_path)
-
-        # Early stopping
-        # if val_loss < best_val_loss:
-        #     best_val_loss = val_loss
-        #     early_stop_count = 0
-        # else:
-        #     early_stop_count += 1
-        #     if early_stop_count >= patience:
-        #         print(f"Pid {pid}, Rank {rank + 1}, Early stopping triggered at epoch {epoch + 1}.")
-        #         break
 
     # Save final checkpoint after training finishes
     if rank == 0:
@@ -268,72 +154,7 @@ def train(rank, world_size, params, pid, output_dir):
         }
         save_checkpoint(final_checkpoint, filename=final_checkpoint_path)
 
-    # Testing loop
-    if rank == 0:
-        # Load the best validation checkpoint
-        if best_checkpoint_path is not None and os.path.exists(best_checkpoint_path):
-            checkpoint = torch.load(best_checkpoint_path, map_location=device)
-            model.load_state_dict(checkpoint['state_dict'])
-            print(f"Loaded best checkpoint from epoch {checkpoint['epoch']} with validation loss: {checkpoint['best_val_loss']}")
-        else:
-            print("Best checkpoint not found, using the final model.")
-
-        model.eval()
-        all_labels = []
-        all_preds = []
-        results = []  # To store all results for saving in CSV
-        with torch.no_grad():
-            for batch_idx, (rgb_images, thermal_images, labels, lengths, rgb_dirs, thermal_dirs) in enumerate(test_loader):
-                rgb_images = rgb_images.to(device)
-                thermal_images = thermal_images.to(device)
-                labels = labels.to(device)
-
-                # Calculate FLOPs for the first batch
-                if batch_idx == 0:
-                    flops = FlopCountAnalysis(model, (rgb_images, thermal_images, lengths))
-                    tflops = flops.total() / 1e12  # Convert FLOPs to TFLOPs
-                    print(f"Estimated TFLOPs for a single forward pass: {tflops:.6f} TFLOPs")
-
-                outputs, rgb_weights, thermal_weights = model(rgb_images, thermal_images, lengths)
-                probs = torch.softmax(outputs, dim=1)
-                _, preds = torch.max(outputs, 1)
-
-                # Append to the results for each video clip
-                for i in range(len(labels)):
-                    result = {
-                        'rgb_video_path': rgb_dirs[i],
-                        'thermal_video_path': thermal_dirs[i],
-                        'true_label': labels[i].cpu().item(),
-                        'prediction': preds[i].cpu().item(),
-                        'prob_max': probs[i].max().cpu().item(),
-                        'prob_0': probs[i][0].cpu().item(),
-                        'prob_1': probs[i][1].cpu().item(),
-                        'prob_2': probs[i][2].cpu().item(),
-                        'rgb_weight': rgb_weights[i].mean().cpu().item(),  # Assuming you want the mean weight
-                        'thermal_weight': thermal_weights[i].mean().cpu().item()  # Assuming you want the mean weight
-                    }
-                    results.append(result)
-
-                all_labels.extend(labels.cpu().numpy())
-                all_preds.extend(preds.cpu().numpy())
-
-        # Only rank 0 saves the plots and prints the test results
-        plot_loss_curves(train_losses, val_losses, pid, output_dir)
-        class_names = ['Negative', 'Smoking', 'Eating']
-        plot_confusion_matrix(all_labels, all_preds, class_names, pid, output_dir)
-
-        # Print test results
-        accuracy = accuracy_score(all_labels, all_preds)
-        precision, recall, f1, _ = precision_recall_fscore_support(all_labels, all_preds, average='weighted')
-        print(f"Test Results for P{pid}:, Accuracy: {accuracy:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1 Score: {f1:.4f}")
-
-        # Convert results to a DataFrame
-        df = pd.DataFrame(results)
-        csv_file_path = os.path.join(output_dir, f"P{pid}_label_pred_prob.csv")
-        df.to_csv(csv_file_path, index=False)
-
-    # Cleanup
-    dist.destroy_process_group()
+    test_loop(model, test_loader, device, pid, rank, world_size, output_dir, load_checkpoint=False)
 
 
 def lopo_train(params, world_size, participant_pids, output_dir):
@@ -343,6 +164,7 @@ def lopo_train(params, world_size, participant_pids, output_dir):
 
 
 if __name__ == '__main__':
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"  # Use only GPU 3
     params = {
         'num_workers': 16,
         'num_resnet_layers': 50,
