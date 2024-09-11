@@ -40,6 +40,8 @@ def train(rank, world_size, params, pid, output_dir):
                    num_resnet_layers=params['num_resnet_layers'],
                    num_lstm_layers=params['num_lstm_layers'],
                    lstm_hidden_size=params['lstm_hidden_size'],
+                   attention_heads=params['attention_heads'],
+                   attention_dim=params['attention_dim'],
                    device=device).to(device)
 
     # Wrap the model with DDP
@@ -99,7 +101,7 @@ def train(rank, world_size, params, pid, output_dir):
             rgb_images = rgb_images.to(device)
             thermal_images = thermal_images.to(device)
             labels = labels.to(device)
-            outputs, _, _ = model(rgb_images, thermal_images, lengths)
+            outputs = model(rgb_images, thermal_images, lengths)
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
@@ -119,7 +121,7 @@ def train(rank, world_size, params, pid, output_dir):
                 rgb_images = rgb_images.to(device)
                 thermal_images = thermal_images.to(device)
                 labels = labels.to(device)
-                outputs, _, _ = model(rgb_images, thermal_images, lengths)
+                outputs = model(rgb_images, thermal_images, lengths)
                 loss = criterion(outputs, labels)
                 val_loss += loss.item()
 
@@ -179,8 +181,10 @@ if __name__ == '__main__':
         'weight_decay': 1e-4,
         'dampening': 0,
         'nesterov': True,
+        'attention_heads': 8,
+        'attention_dim': 256,
     }
     world_size = 3  # Only use GPUs 1, 2 and 3
-    output_dir = "/home/meixi/mid_fusion/rtfnet/output/no_attention_late_fusion_no_skip_connection"
+    output_dir = "/home/meixi/mid_fusion/rtfnet/output/early_cross_attention_late_fusion_no_skip_connection_8_256"
     participant_pids = [6, 7, 13, 14, 15, 16, 18]
     lopo_train(params, world_size, participant_pids, output_dir)

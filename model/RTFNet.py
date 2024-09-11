@@ -15,6 +15,8 @@ class RTFNet(nn.Module):
                  num_resnet_layers=50,
                  num_lstm_layers=1,
                  lstm_hidden_size=512,
+                 attention_heads=8,  # Add multi-head attention
+                 attention_dim=128,  # Dimension for attention embeddings
                  device=torch.device('cuda:0')):
         super(RTFNet, self).__init__()
         self.device = device
@@ -66,11 +68,14 @@ class RTFNet(nn.Module):
         self.encoder_rgb_layer3 = resnet_raw_model2.layer3
         self.encoder_rgb_layer4 = resnet_raw_model2.layer4
 
-        # Simplified Attention mechanism: Single Linear Layer
-        self.attention_fc = nn.Linear(128, 2)
+        # Cross-modality self-attention mechanism after Layer 1
+        self.cross_attention_layer1 = nn.MultiheadAttention(embed_dim=attention_dim, num_heads=attention_heads)
 
         # Global average pooling layer
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+
+        # Linear projection to match dimensions (from 256 to 2048)
+        self.linear_proj = nn.Linear(attention_dim, self.inplanes)
 
         # LSTM module
         self.lstm = nn.LSTM(input_size=self.inplanes, hidden_size=lstm_hidden_size, num_layers=num_lstm_layers,
@@ -87,64 +92,64 @@ class RTFNet(nn.Module):
 
         # Initialize an empty list to store features for each frame
         features = []
-        rgb_weights_list = []
-        thermal_weights_list = []
 
         for t in range(rgb_images.size(1)):  # iterate over time dimension
             rgb = rgb_images[:, t]
             thermal = thermal_images[:, t]
 
-            # encoder
-
+            # RGB encoder
             rgb = self.encoder_rgb_conv1(rgb)
             rgb = self.encoder_rgb_bn1(rgb)
             rgb = self.encoder_rgb_relu(rgb)
+            rgb = self.encoder_rgb_maxpool(rgb)
 
+            # Thermal encoder
             thermal = self.encoder_thermal_conv1(thermal)
             thermal = self.encoder_thermal_bn1(thermal)
             thermal = self.encoder_thermal_relu(thermal)
-
-            # Combine global features from RGB and thermal for attention calculation
-            rgb_global = self.global_avg_pool(rgb).view(rgb.size(0), -1)  # Global avg pool and flatten
-            thermal_global = self.global_avg_pool(thermal).view(thermal.size(0), -1)
-
-            combined_features = torch.cat((rgb_global, thermal_global), dim=1)  # Concatenate along feature dimension
-            attention_weights = torch.sigmoid(self.attention_fc(combined_features))  # Compute attention weights
-            rgb_weight, thermal_weight = attention_weights[:, 0].view(-1, 1, 1, 1), attention_weights[:, 1].view(-1, 1, 1, 1)
-
-            # Append weights to list for each time step
-            rgb_weights_list.append(rgb_weight)
-            thermal_weights_list.append(thermal_weight)
-
-            # rgb = rgb + thermal
-
-            rgb = self.encoder_rgb_maxpool(rgb)
             thermal = self.encoder_thermal_maxpool(thermal)
 
+            # Layer 1
             rgb = self.encoder_rgb_layer1(rgb)
             thermal = self.encoder_thermal_layer1(thermal)
 
-            # rgb = rgb + thermal
+            # Compute attention after Layer 1 (cross-modality)
+            # Apply global average pooling for attention computation
+            rgb_global_layer1 = self.global_avg_pool(rgb).view(rgb.size(0), 1, -1)  # Shape: [batch_size, 1, feature_dim]
+            thermal_global_layer1 = self.global_avg_pool(thermal).view(thermal.size(0), 1, -1)  # Shape: [batch_size, 1, feature_dim]
 
+            # Concatenate RGB and Thermal features along the sequence dimension for attention
+            combined_layer1 = torch.cat((rgb_global_layer1, thermal_global_layer1), dim=1).transpose(0, 1)  # [seq_len=2, batch_size, feature_dim]
+
+            # Apply multi-head attention after Layer 1
+            attended_features_layer1, attn_weights_layer1 = self.cross_attention_layer1(combined_layer1, combined_layer1, combined_layer1)
+
+            # Extract RGB and thermal attention features after Layer 1 attention
+            rgb_weighted_layer1 = attended_features_layer1[0].view(rgb.size(0), -1)
+            thermal_weighted_layer1 = attended_features_layer1[1].view(thermal.size(0), -1)
+
+            # Project Layer 1 attention features to match Layer 4 dimensionality
+            rgb_weighted_layer1 = self.linear_proj(rgb_weighted_layer1)  # Project to 2048
+            thermal_weighted_layer1 = self.linear_proj(thermal_weighted_layer1)  # Project to 2048
+
+            # Layer 2
             rgb = self.encoder_rgb_layer2(rgb)
             thermal = self.encoder_thermal_layer2(thermal)
 
-            # rgb = rgb + thermal
-
+            # Layer 3
             rgb = self.encoder_rgb_layer3(rgb)
             thermal = self.encoder_thermal_layer3(thermal)
 
-            # rgb = rgb + thermal
-
+            # Layer 4
             rgb = self.encoder_rgb_layer4(rgb)
             thermal = self.encoder_thermal_layer4(thermal)
 
-            fuse = rgb_weight * rgb + thermal_weight * thermal
+            # Modulate Layer 4 features with Layer 1 attention weights
+            rgb_global = self.global_avg_pool(rgb).view(rgb.size(0), -1)  # Shape: [batch_size, feature_dim]
+            thermal_global = self.global_avg_pool(thermal).view(thermal.size(0), -1)  # Shape: [batch_size, feature_dim]
 
-            # Global Average Pooling
-            fuse = self.global_avg_pool(fuse)
-            fuse = fuse.view(fuse.size(0), -1)  # Flatten
-
+            # Combine using weighted sum after attention modulation
+            fuse = rgb_global * rgb_weighted_layer1 + thermal_global * thermal_weighted_layer1
             features.append(fuse)
 
         # Stack the features along the time dimension
@@ -155,11 +160,7 @@ class RTFNet(nn.Module):
         final_output = hn[-1]  # Take the last hidden state
         output = self.classifier(final_output)
 
-        # Stack weights along the time dimension
-        rgb_weights = torch.stack(rgb_weights_list, dim=1)
-        thermal_weights = torch.stack(thermal_weights_list, dim=1)
-
-        return output, rgb_weights, thermal_weights
+        return output
 
 
 def unit_test():

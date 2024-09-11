@@ -79,12 +79,12 @@ def test_loop(model, test_loader, device, pid, rank, world_size, output_dir, loa
             labels = labels.to(device)
 
             # Calculate FLOPs for the first batch
-            if batch_idx == 0:
+            if rank == 0 and batch_idx == 0:
                 flops = FlopCountAnalysis(model, (rgb_images, thermal_images, lengths))
                 tflops = flops.total() / 1e12  # Convert FLOPs to TFLOPs
                 print(f"Estimated TFLOPs for a single forward pass: {tflops:.6f} TFLOPs")
 
-            outputs, rgb_weights, thermal_weights = model(rgb_images, thermal_images, lengths)
+            outputs = model(rgb_images, thermal_images, lengths)
             probs = torch.softmax(outputs, dim=1)
             _, preds = torch.max(outputs, 1)
 
@@ -99,8 +99,6 @@ def test_loop(model, test_loader, device, pid, rank, world_size, output_dir, loa
                     'prob_0': probs[i][0].cpu().item(),
                     'prob_1': probs[i][1].cpu().item(),
                     'prob_2': probs[i][2].cpu().item(),
-                    'rgb_weight': rgb_weights[i].mean().cpu().item(),
-                    'thermal_weight': thermal_weights[i].mean().cpu().item()
                 }
                 results.append(result)
 
