@@ -66,9 +66,6 @@ class RTFNet(nn.Module):
         self.encoder_rgb_layer3 = resnet_raw_model2.layer3
         self.encoder_rgb_layer4 = resnet_raw_model2.layer4
 
-        # Simplified Attention mechanism: Single Linear Layer
-        self.attention_fc = nn.Linear(128, 2)
-
         # Global average pooling layer
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
 
@@ -87,15 +84,12 @@ class RTFNet(nn.Module):
 
         # Initialize an empty list to store features for each frame
         features = []
-        rgb_weights_list = []
-        thermal_weights_list = []
 
         for t in range(rgb_images.size(1)):  # iterate over time dimension
             rgb = rgb_images[:, t]
             thermal = thermal_images[:, t]
 
             # encoder
-
             rgb = self.encoder_rgb_conv1(rgb)
             rgb = self.encoder_rgb_bn1(rgb)
             rgb = self.encoder_rgb_relu(rgb)
@@ -104,42 +98,22 @@ class RTFNet(nn.Module):
             thermal = self.encoder_thermal_bn1(thermal)
             thermal = self.encoder_thermal_relu(thermal)
 
-            # Combine global features from RGB and thermal for attention calculation
-            rgb_global = self.global_avg_pool(rgb).view(rgb.size(0), -1)  # Global avg pool and flatten
-            thermal_global = self.global_avg_pool(thermal).view(thermal.size(0), -1)
-
-            combined_features = torch.cat((rgb_global, thermal_global), dim=1)  # Concatenate along feature dimension
-            attention_weights = torch.sigmoid(self.attention_fc(combined_features))  # Compute attention weights
-            rgb_weight, thermal_weight = attention_weights[:, 0].view(-1, 1, 1, 1), attention_weights[:, 1].view(-1, 1, 1, 1)
-
-            # Append weights to list for each time step
-            rgb_weights_list.append(rgb_weight)
-            thermal_weights_list.append(thermal_weight)
-
-            # rgb = rgb + thermal
-
             rgb = self.encoder_rgb_maxpool(rgb)
             thermal = self.encoder_thermal_maxpool(thermal)
 
             rgb = self.encoder_rgb_layer1(rgb)
             thermal = self.encoder_thermal_layer1(thermal)
 
-            # rgb = rgb + thermal
-
             rgb = self.encoder_rgb_layer2(rgb)
             thermal = self.encoder_thermal_layer2(thermal)
-
-            # rgb = rgb + thermal
 
             rgb = self.encoder_rgb_layer3(rgb)
             thermal = self.encoder_thermal_layer3(thermal)
 
-            # rgb = rgb + thermal
-
             rgb = self.encoder_rgb_layer4(rgb)
             thermal = self.encoder_thermal_layer4(thermal)
 
-            fuse = rgb_weight * rgb + thermal_weight * thermal
+            fuse = rgb + thermal
 
             # Global Average Pooling
             fuse = self.global_avg_pool(fuse)
@@ -155,11 +129,7 @@ class RTFNet(nn.Module):
         final_output = hn[-1]  # Take the last hidden state
         output = self.classifier(final_output)
 
-        # Stack weights along the time dimension
-        rgb_weights = torch.stack(rgb_weights_list, dim=1)
-        thermal_weights = torch.stack(thermal_weights_list, dim=1)
-
-        return output, rgb_weights, thermal_weights
+        return output
 
 
 def unit_test():
