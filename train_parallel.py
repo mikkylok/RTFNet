@@ -1,7 +1,5 @@
 import os
 import time
-import pandas as pd
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
 import torch
 import torch.nn as nn
@@ -185,6 +183,6 @@ if __name__ == '__main__':
         'attention_dim': 256,
     }
     world_size = 3  # Only use GPUs 1, 2 and 3
-    output_dir = "/home/meixi/mid_fusion/rtfnet/output/early_cross_attention_late_fusion_no_skip_connection_8_256"
+    output_dir = "/home/meixi/mid_fusion/rtfnet/output/late_cross_attention_late_fusion_no_skip_connection_8_256"
     participant_pids = [6, 7, 13, 14, 15, 16, 18]
     lopo_train(params, world_size, participant_pids, output_dir)

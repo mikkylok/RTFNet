@@ -68,17 +68,19 @@ class RTFNet(nn.Module):
         self.encoder_rgb_layer3 = resnet_raw_model2.layer3
         self.encoder_rgb_layer4 = resnet_raw_model2.layer4
 
+        self.linear_proj = nn.Linear(self.inplanes, attention_dim)
+
         # Cross-modality self-attention mechanism after Layer 1
-        self.cross_attention_layer1 = nn.MultiheadAttention(embed_dim=attention_dim, num_heads=attention_heads)
+        self.cross_attention = nn.MultiheadAttention(embed_dim=attention_dim, num_heads=attention_heads)
 
         # Global average pooling layer
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
 
         # Linear projection to match dimensions (from 256 to 2048)
-        self.linear_proj = nn.Linear(attention_dim, self.inplanes)
+        self.linear_proj = nn.Linear(self.inplanes, attention_dim)
 
         # LSTM module
-        self.lstm = nn.LSTM(input_size=self.inplanes, hidden_size=lstm_hidden_size, num_layers=num_lstm_layers,
+        self.lstm = nn.LSTM(input_size=attention_dim, hidden_size=lstm_hidden_size, num_layers=num_lstm_layers,
                             batch_first=True)
         self.lstm.flatten_parameters()
 
@@ -113,25 +115,6 @@ class RTFNet(nn.Module):
             rgb = self.encoder_rgb_layer1(rgb)
             thermal = self.encoder_thermal_layer1(thermal)
 
-            # Compute attention after Layer 1 (cross-modality)
-            # Apply global average pooling for attention computation
-            rgb_global_layer1 = self.global_avg_pool(rgb).view(rgb.size(0), 1, -1)  # Shape: [batch_size, 1, feature_dim]
-            thermal_global_layer1 = self.global_avg_pool(thermal).view(thermal.size(0), 1, -1)  # Shape: [batch_size, 1, feature_dim]
-
-            # Concatenate RGB and Thermal features along the sequence dimension for attention
-            combined_layer1 = torch.cat((rgb_global_layer1, thermal_global_layer1), dim=1).transpose(0, 1)  # [seq_len=2, batch_size, feature_dim]
-
-            # Apply multi-head attention after Layer 1
-            attended_features_layer1, attn_weights_layer1 = self.cross_attention_layer1(combined_layer1, combined_layer1, combined_layer1)
-
-            # Extract RGB and thermal attention features after Layer 1 attention
-            rgb_weighted_layer1 = attended_features_layer1[0].view(rgb.size(0), -1)
-            thermal_weighted_layer1 = attended_features_layer1[1].view(thermal.size(0), -1)
-
-            # Project Layer 1 attention features to match Layer 4 dimensionality
-            rgb_weighted_layer1 = self.linear_proj(rgb_weighted_layer1)  # Project to 2048
-            thermal_weighted_layer1 = self.linear_proj(thermal_weighted_layer1)  # Project to 2048
-
             # Layer 2
             rgb = self.encoder_rgb_layer2(rgb)
             thermal = self.encoder_thermal_layer2(thermal)
@@ -144,12 +127,26 @@ class RTFNet(nn.Module):
             rgb = self.encoder_rgb_layer4(rgb)
             thermal = self.encoder_thermal_layer4(thermal)
 
-            # Modulate Layer 4 features with Layer 1 attention weights
-            rgb_global = self.global_avg_pool(rgb).view(rgb.size(0), -1)  # Shape: [batch_size, feature_dim]
-            thermal_global = self.global_avg_pool(thermal).view(thermal.size(0), -1)  # Shape: [batch_size, feature_dim]
+            # Apply global average pooling after Layer 4
+            rgb_global = self.global_avg_pool(rgb).view(rgb.size(0), 1, -1)  # Shape: [batch_size, 1, feature_dim]
+            thermal_global = self.global_avg_pool(thermal).view(thermal.size(0), 1, -1)  # Shape: [batch_size, 1, feature_dim]
 
-            # Combine using weighted sum after attention modulation
-            fuse = rgb_global * rgb_weighted_layer1 + thermal_global * thermal_weighted_layer1
+            # Concatenate RGB and Thermal features along the sequence dimension for attention
+            combined = torch.cat((rgb_global, thermal_global), dim=1).transpose(0, 1)  # Shape: [seq_len=2, batch_size, feature_dim]
+
+            # Project 2048-dim features down to attention_dim=128 before attention
+            combined_proj = self.linear_proj(combined)  # Shape: [seq_len=2, batch_size, attention_dim=128]
+
+            # Apply multi-head attention (cross-modality attention)
+            attended_features, attn_weights = self.cross_attention(combined_proj, combined_proj, combined_proj)
+
+            # Extract RGB and thermal weighted features after attention
+            rgb_weighted = attended_features[0].view(rgb.size(0), -1)  # Attended RGB features
+            thermal_weighted = attended_features[1].view(thermal.size(0), -1)  # Attended Thermal features
+
+            # Combine using weighted sum
+            fuse = rgb_weighted + thermal_weighted
+
             features.append(fuse)
 
         # Stack the features along the time dimension
