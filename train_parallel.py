@@ -99,7 +99,7 @@ def train(rank, world_size, params, pid, output_dir):
             rgb_images = rgb_images.to(device)
             thermal_images = thermal_images.to(device)
             labels = labels.to(device)
-            outputs = model(rgb_images, thermal_images, lengths)
+            outputs, _, _ = model(rgb_images, thermal_images, lengths)
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
@@ -119,7 +119,7 @@ def train(rank, world_size, params, pid, output_dir):
                 rgb_images = rgb_images.to(device)
                 thermal_images = thermal_images.to(device)
                 labels = labels.to(device)
-                outputs = model(rgb_images, thermal_images, lengths)
+                outputs, _, _ = model(rgb_images, thermal_images, lengths)
                 loss = criterion(outputs, labels)
                 val_loss += loss.item()
 

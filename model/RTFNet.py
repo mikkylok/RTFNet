@@ -16,7 +16,7 @@ class RTFNet(nn.Module):
                  num_lstm_layers=1,
                  lstm_hidden_size=512,
                  attention_heads=8,  # Add multi-head attention
-                 attention_dim=128,  # Dimension for attention embeddings
+                 attention_dim=256,  # Dimension for attention embeddings
                  device=torch.device('cuda:0')):
         super(RTFNet, self).__init__()
         self.device = device
@@ -68,9 +68,7 @@ class RTFNet(nn.Module):
         self.encoder_rgb_layer3 = resnet_raw_model2.layer3
         self.encoder_rgb_layer4 = resnet_raw_model2.layer4
 
-        self.linear_proj = nn.Linear(self.inplanes, attention_dim)
-
-        # Cross-modality self-attention mechanism after Layer 1
+        # Ensure this variable is set properly
         self.cross_attention = nn.MultiheadAttention(embed_dim=attention_dim, num_heads=attention_heads)
 
         # Global average pooling layer
@@ -90,10 +88,11 @@ class RTFNet(nn.Module):
         # Move all modules to the specified device
         self.to(self.device)
 
-    def forward(self, rgb_images, thermal_images, lengths):
+    def forward(self, rgb_images, thermal_images):
 
         # Initialize an empty list to store features for each frame
         features = []
+        all_attention_weights = []
 
         for t in range(rgb_images.size(1)):  # iterate over time dimension
             rgb = rgb_images[:, t]
@@ -135,10 +134,12 @@ class RTFNet(nn.Module):
             combined = torch.cat((rgb_global, thermal_global), dim=1).transpose(0, 1)  # Shape: [seq_len=2, batch_size, feature_dim]
 
             # Project 2048-dim features down to attention_dim=128 before attention
-            combined_proj = self.linear_proj(combined)  # Shape: [seq_len=2, batch_size, attention_dim=128]
+            combined_proj = self.linear_proj(combined)  # Shape: [seq_len=2, batch_size, attention_dim=256]
 
             # Apply multi-head attention (cross-modality attention)
             attended_features, attn_weights = self.cross_attention(combined_proj, combined_proj, combined_proj)
+
+            all_attention_weights.append(attn_weights)
 
             # Extract RGB and thermal weighted features after attention
             rgb_weighted = attended_features[0].view(rgb.size(0), -1)  # Attended RGB features
@@ -157,7 +158,7 @@ class RTFNet(nn.Module):
         final_output = hn[-1]  # Take the last hidden state
         output = self.classifier(final_output)
 
-        return output
+        return output, all_attention_weights, lstm_out
 
 
 def unit_test():

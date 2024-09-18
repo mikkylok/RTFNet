@@ -84,7 +84,7 @@ def test_loop(model, test_loader, device, pid, rank, world_size, output_dir, loa
                 tflops = flops.total() / 1e12  # Convert FLOPs to TFLOPs
                 print(f"Estimated TFLOPs for a single forward pass: {tflops:.6f} TFLOPs")
 
-            outputs = model(rgb_images, thermal_images, lengths)
+            outputs, _, _ = model(rgb_images, thermal_images, lengths)
             probs = torch.softmax(outputs, dim=1)
             _, preds = torch.max(outputs, 1)
 
