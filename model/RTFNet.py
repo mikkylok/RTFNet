@@ -69,16 +69,16 @@ class RTFNet(nn.Module):
         self.encoder_rgb_layer4 = resnet_raw_model2.layer4
 
         # Ensure this variable is set properly
-        self.cross_attention = nn.MultiheadAttention(embed_dim=attention_dim, num_heads=attention_heads)
+        self.cross_attention_layer1 = nn.MultiheadAttention(embed_dim=attention_dim, num_heads=attention_heads)
 
         # Global average pooling layer
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
 
         # Linear projection to match dimensions (from 256 to 2048)
-        self.linear_proj = nn.Linear(self.inplanes, attention_dim)
+        self.linear_proj = nn.Linear(attention_dim, self.inplanes)
 
         # LSTM module
-        self.lstm = nn.LSTM(input_size=attention_dim, hidden_size=lstm_hidden_size, num_layers=num_lstm_layers,
+        self.lstm = nn.LSTM(input_size=self.inplanes, hidden_size=lstm_hidden_size, num_layers=num_lstm_layers,
                             batch_first=True)
         self.lstm.flatten_parameters()
 
@@ -92,7 +92,8 @@ class RTFNet(nn.Module):
 
         # Initialize an empty list to store features for each frame
         features = []
-        all_attention_weights = []
+        rgb_attention_weights = []
+        thermal_attention_weights = []
 
         for t in range(rgb_images.size(1)):  # iterate over time dimension
             rgb = rgb_images[:, t]
@@ -114,6 +115,19 @@ class RTFNet(nn.Module):
             rgb = self.encoder_rgb_layer1(rgb)
             thermal = self.encoder_thermal_layer1(thermal)
 
+            # Compute attention after Layer 1 (cross-modality)
+            # Apply global average pooling for attention computation
+            rgb_global_layer1 = self.global_avg_pool(rgb).view(rgb.size(0), 1, -1)  # Shape: [batch_size, 1, feature_dim]
+            thermal_global_layer1 = self.global_avg_pool(thermal).view(thermal.size(0), 1, -1)  # Shape: [batch_size, 1, feature_dim]
+            combined_layer1 = torch.cat((rgb_global_layer1, thermal_global_layer1), dim=1).transpose(0, 1)  # [seq_len=2, batch_size, feature_dim]
+            attended_features_layer1, attn_weights_layer1 = self.cross_attention_layer1(combined_layer1, combined_layer1, combined_layer1)
+            rgb_weighted_layer1 = attended_features_layer1[0].view(rgb.size(0), -1)
+            thermal_weighted_layer1 = attended_features_layer1[1].view(thermal.size(0), -1)
+
+            # Project Layer 1 attention features to match Layer 4 dimensionality
+            rgb_weighted_layer1 = self.linear_proj(rgb_weighted_layer1)  # Project to 2048
+            thermal_weighted_layer1 = self.linear_proj(thermal_weighted_layer1)  # Project to 2048
+
             # Layer 2
             rgb = self.encoder_rgb_layer2(rgb)
             thermal = self.encoder_thermal_layer2(thermal)
@@ -126,29 +140,27 @@ class RTFNet(nn.Module):
             rgb = self.encoder_rgb_layer4(rgb)
             thermal = self.encoder_thermal_layer4(thermal)
 
-            # Apply global average pooling after Layer 4
-            rgb_global = self.global_avg_pool(rgb).view(rgb.size(0), 1, -1)  # Shape: [batch_size, 1, feature_dim]
-            thermal_global = self.global_avg_pool(thermal).view(thermal.size(0), 1, -1)  # Shape: [batch_size, 1, feature_dim]
+            # Modulate Layer 4 features with Layer 1 attention weights
+            rgb_global = self.global_avg_pool(rgb).view(rgb.size(0), -1)  # Shape: [batch_size, feature_dim]
+            thermal_global = self.global_avg_pool(thermal).view(thermal.size(0), -1)  # Shape: [batch_size, feature_dim]
 
-            # Concatenate RGB and Thermal features along the sequence dimension for attention
-            combined = torch.cat((rgb_global, thermal_global), dim=1).transpose(0, 1)  # Shape: [seq_len=2, batch_size, feature_dim]
-
-            # Project 2048-dim features down to attention_dim=128 before attention
-            combined_proj = self.linear_proj(combined)  # Shape: [seq_len=2, batch_size, attention_dim=256]
-
-            # Apply multi-head attention (cross-modality attention)
-            attended_features, attn_weights = self.cross_attention(combined_proj, combined_proj, combined_proj)
-
-            all_attention_weights.append(attn_weights)
-
-            # Extract RGB and thermal weighted features after attention
-            rgb_weighted = attended_features[0].view(rgb.size(0), -1)  # Attended RGB features
-            thermal_weighted = attended_features[1].view(thermal.size(0), -1)  # Attended Thermal features
-
-            # Combine using weighted sum
-            fuse = rgb_weighted + thermal_weighted
-
+            # Combine using weighted sum after attention modulation
+            fuse = rgb_global * rgb_weighted_layer1 + thermal_global * thermal_weighted_layer1
             features.append(fuse)
+
+            # Get RGB and Thermal Contribution
+            # Calculate total RGB attention (i.e., total RGB contribution)
+            rgb_to_rgb_weight = attn_weights_layer1[:, 0, 0]  # RGB attends to RGB
+            thermal_to_rgb_weight = attn_weights_layer1[:, 1, 0]  # Thermal attends to RGB
+            total_rgb_attention = rgb_to_rgb_weight + thermal_to_rgb_weight
+            total_rgb_attention_per_head = torch.sum(total_rgb_attention, dim=0)  # Sum attention weights over all heads
+            rgb_attention_weights.append(total_rgb_attention_per_head)
+            # Calculate total Thermal attention (i.e., total RGB Thermal)
+            thermal_to_thermal_weight = attn_weights_layer1[:, 1, 1]  # Thermal attends to Thermal
+            rgb_to_thermal_weight = attn_weights_layer1[:, 0, 1]  # RGB attends to Thermal
+            total_thermal_attention = thermal_to_thermal_weight + rgb_to_thermal_weight
+            total_thermal_attention_per_head = torch.sum(total_thermal_attention, dim=0)  # Sum attention weights over all heads
+            thermal_attention_weights.append(total_thermal_attention_per_head)
 
         # Stack the features along the time dimension
         features = torch.stack(features, dim=1)  # shape (batch, frames, features)
@@ -158,7 +170,7 @@ class RTFNet(nn.Module):
         final_output = hn[-1]  # Take the last hidden state
         output = self.classifier(final_output)
 
-        return output, all_attention_weights, lstm_out
+        return output, lstm_out, rgb_attention_weights, thermal_attention_weights
 
 
 def unit_test():
