@@ -13,9 +13,15 @@ import torch.distributed as dist
 
 # Set the environment variable
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
-BASE_LR = 0.005
-STEPS = [0, 11, 14]
-LRS = [1, 0.1, 0.01]
+# BASE_LR = 0.005
+# STEPS = [0, 11, 14]
+# LRS = [1, 0.1, 0.01]
+# STEPS = [0, 30, 44, 56]
+# LRS = [1, 0.5, 0.1, 0.01]
+
+BASE_LR = 0.01
+STEPS = [0, 10, 20, 30, 40, 50]
+LRS = [1, 0.1, 0.01, 0.001, 0.0001, 0.00001]
 
 
 def get_lr_at_epoch(cur_epoch, max_epoch):
@@ -66,10 +72,7 @@ def seed_worker(worker_id):
 
 
 def collate_fn(batch):
-    rgb_images, thermal_images, labels, timestamps, rgb_dir, thermal_dir = zip(*batch)
-
-    # Find sequence lengths
-    lengths = [len(seq) for seq in rgb_images]
+    rgb_images, thermal_images, labels, rgb_dir, thermal_dir = zip(*batch)
 
     # Pad sequences
     rgb_images = rnn_utils.pad_sequence(rgb_images, batch_first=True)
@@ -78,36 +81,36 @@ def collate_fn(batch):
     # Stack labels
     labels = torch.stack(labels)
 
-    return rgb_images, thermal_images, labels, lengths, rgb_dir, thermal_dir
+    return rgb_images, thermal_images, labels, rgb_dir, thermal_dir
 
 
-def plot_loss_curves(train_losses, val_losses, pid, output_dir):
+def plot_loss_curves(train_losses, val_losses, output_dir):
     plt.figure(figsize=(10, 5))
     plt.plot(train_losses, label='Training Loss')
     plt.plot(val_losses, label='Validation Loss')
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
-    plt.title(f"P{pid}: Training and Validation Loss Curves")
+    plt.title(f"Training and Validation Loss Curves")
     plt.legend()
     plt.grid(True)
-    plt.savefig(os.path.join(output_dir, f"P{pid}_loss_plot.png"))
+    plt.savefig(os.path.join(output_dir, f"loss_plot.png"))
     plt.close()
 
 
-def plot_confusion_matrix(labels, preds, class_names, pid, output_dir):
+def plot_confusion_matrix(labels, preds, class_names, output_dir):
     cm = confusion_matrix(labels, preds)
     plt.figure(figsize=(8, 6))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
     plt.xlabel('Predicted')
     plt.ylabel('True')
-    plt.title(f'P{pid} Confusion Matrix')
-    plt.savefig(os.path.join(output_dir, f"P{pid}_confusion_matrix.png"))
+    plt.title(f'Confusion Matrix')
+    plt.savefig(os.path.join(output_dir, f"confusion_matrix.png"))
     plt.close()
 
 
-def find_best_checkpoint(output_dir, pid):
+def find_best_checkpoint(output_dir):
     # Use glob to search for files matching the pattern "P<pid>_best_checkpoint_epoch_*.pth.tar"
-    checkpoint_pattern = os.path.join(output_dir, f"P{pid}_best_checkpoint_epoch_*.pth.tar")
+    checkpoint_pattern = os.path.join(output_dir, f"best_checkpoint_epoch_*.pth.tar")
     checkpoint_files = glob.glob(checkpoint_pattern)
 
     if not checkpoint_files:

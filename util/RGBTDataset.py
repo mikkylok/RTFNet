@@ -1,9 +1,8 @@
 import os
+import pandas as pd
+from PIL import Image
 import torch
 from torch.utils.data import Dataset
-import numpy as np
-from PIL import Image
-import pandas as pd
 
 
 def temporal_sampling(frames, num_samples):
@@ -22,60 +21,56 @@ def temporal_sampling(frames, num_samples):
 
 
 class RGBThermalDataset(Dataset):
-    def __init__(self, data_dir, pid, split, input_h=480, input_w=640, transform=None, target_num_frames=9):
+    def __init__(self, data_dir, split, rgb_transform=None, thermal_transform=None, target_num_frames=9):
         super(RGBThermalDataset, self).__init__()
 
-        self.image_dir = os.path.join(data_dir, f'P{pid}', 'rgbt-mid-fusion-rtfnet', 'image')
-        self.labels_path = os.path.join(data_dir, f'P{pid}', 'rgbt-mid-fusion-rtfnet', 'label', f'{split}.csv')
+        self.image_dir = os.path.join(data_dir, 'image')
+        self.labels_path = os.path.join(data_dir, 'label', f'{split}.csv')
 
         # Load labels
         self.labels_df = pd.read_csv(self.labels_path)
 
-        # Other attributes
-        self.input_h = input_h
-        self.input_w = input_w
-        self.transform = transform  # Add transform attribute
-        self.target_num_frames = target_num_frames  # Target number of frames
-
+        # Transforms
+        self.rgb_transform = rgb_transform
+        self.thermal_transform = thermal_transform
+        self.target_num_frames = target_num_frames
 
     def read_image(self, image_dir, image_type):
         image_paths = sorted([os.path.join(image_dir, fname) for fname in os.listdir(image_dir)])
         images = []
         for image_path in image_paths:
             try:
-                image = Image.open(image_path).resize((self.input_w, self.input_h))
-                if self.transform:
-                    image = self.transform(image)  # Apply the transform
-                else:
-                    image = np.asarray(image, dtype=np.float32) / 255.0
-                    if image_type == 'thermal':
-                        image = np.expand_dims(image, axis=-1)  # Ensure thermal is (H, W, 1)
-                    image = np.transpose(image, (2, 0, 1))  # Convert to (C, H, W)
-                    image = torch.from_numpy(image)
+                image = Image.open(image_path)
+                # Apply specific transform
+                if image_type == 'rgb' and self.rgb_transform:
+                    image = self.rgb_transform(image)
+                elif image_type == 'thermal' and self.thermal_transform:
+                    image = self.thermal_transform(image)
                 images.append(image)
             except Exception as e:
                 print(f"Error loading image {image_path}: {e}")
 
-        images = torch.stack(images)  # Stack to get shape (num_frames, C, H, W)
-
-        # Apply temporal sampling to ensure all sequences have the same number of frames
+        images = torch.stack(images)  # Shape (num_frames, C, H, W)
         images = temporal_sampling(images, self.target_num_frames)
+
+        if image_type == 'thermal':
+            images = images.squeeze(1)  # Remove any extra dimensions for thermal images
 
         return images
 
     def __getitem__(self, index):
         # Get the timestamp and label
-        timestamp, label = self.labels_df.iloc[index]
+        video_image_path, label = self.labels_df.iloc[index]
 
         # Define the image directories for RGB and thermal images
-        rgb_dir = os.path.join(self.image_dir, str(timestamp), 'rgb')
-        thermal_dir = os.path.join(self.image_dir, str(timestamp), 'thermal')
+        rgb_dir = os.path.join(video_image_path, 'rgb')
+        thermal_dir = os.path.join(video_image_path, 'ir')
 
         # Read and sort images
         rgb_images = self.read_image(rgb_dir, 'rgb')
         thermal_images = self.read_image(thermal_dir, 'thermal')
 
-        return rgb_images, thermal_images, torch.tensor(label), str(timestamp), rgb_dir, thermal_dir
+        return rgb_images, thermal_images, torch.tensor(label), rgb_dir, thermal_dir
 
     def __len__(self):
         return len(self.labels_df)

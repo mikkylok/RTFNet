@@ -1,8 +1,3 @@
-# coding:utf-8
-# Original By Yuxiang Sun, Aug. 2, 2019
-# Modified By Meixi Lu
-
-
 import torch
 import torch.nn as nn 
 import torchvision.models as models

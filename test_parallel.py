@@ -13,8 +13,6 @@ from fvcore.nn import FlopCountAnalysis
 from model.RTFNet import RTFNet
 from util.RGBTDataset import RGBThermalDataset
 from util.tools import setup, set_random_seed, collate_fn, find_best_checkpoint, plot_confusion_matrix
-from torchvision import transforms
-
 
 # Custom transform to ensure single-channel grayscale
 class EnsureGrayscale:
@@ -24,7 +22,10 @@ class EnsureGrayscale:
         return transforms.ToTensor()(image).unsqueeze(0)  # Add channel dimension (1, H, W)
 
 
-def test(params, output_dir):
+
+def test(rank, world_size, params, output_dir):
+    # Setup for distributed computing
+    setup(rank, world_size)
 
     # For reproducibility
     set_random_seed(42)
@@ -35,7 +36,7 @@ def test(params, output_dir):
     num_workers = params['num_workers']
 
     # Map the rank to the correct GPU (2 or 3)
-    device = torch.device(f'cuda:1')
+    device = torch.device(f'cuda:{rank}')
 
     # Initialize the model and move it to the current device
     model = RTFNet(n_class=num_classes,
@@ -43,6 +44,9 @@ def test(params, output_dir):
                    num_lstm_layers=params['num_lstm_layers'],
                    lstm_hidden_size=params['lstm_hidden_size'],
                    device=device).to(device)
+
+    # Wrap the model with DDP
+    model = DDP(model, device_ids=[rank])
 
     # RGB transform (for example, resizing and normalizing)
     rgb_transform = transforms.Compose([
@@ -59,12 +63,13 @@ def test(params, output_dir):
     # Create dataset, distributed sampler and data loader
     data_dir = params['data_dir']
     test_dataset = RGBThermalDataset(data_dir=data_dir, split='test', rgb_transform=rgb_transform, thermal_transform=thermal_transform)
+    test_sampler = DistributedSampler(test_dataset, num_replicas=world_size, rank=rank)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
-                             collate_fn=collate_fn, pin_memory=True)
-    test_loop(model, test_loader, device, world_size, output_dir, load_checkpoint=True)
+                             collate_fn=collate_fn, pin_memory=True, sampler=test_sampler)
+    test_loop(model, test_loader, device, rank, world_size, output_dir, load_checkpoint=True)
 
 
-def test_loop(model, test_loader, device, output_dir, load_checkpoint=True):
+def test_loop(model, test_loader, device, rank, world_size, output_dir, load_checkpoint=True):
     if load_checkpoint:
         # Load the best checkpoint
         best_checkpoint_path = find_best_checkpoint(output_dir)
@@ -83,14 +88,12 @@ def test_loop(model, test_loader, device, output_dir, load_checkpoint=True):
     results = []
     with torch.no_grad():
         for batch_idx, (rgb_images, thermal_images, labels, rgb_dirs, thermal_dirs) in enumerate(test_loader):
-            if batch_idx == 4:
-                break
             rgb_images = rgb_images.to(device)
             thermal_images = thermal_images.to(device)
             labels = labels.to(device)
 
             # Calculate FLOPs for the first batch
-            if batch_idx == 0:
+            if rank == 0 and batch_idx == 0:
                 flops = FlopCountAnalysis(model, (rgb_images, thermal_images))
                 tflops = flops.total() / 1e12  # Convert FLOPs to TFLOPs
                 print(f"Estimated TFLOPs for a single forward pass: {tflops:.6f} TFLOPs")
@@ -115,39 +118,37 @@ def test_loop(model, test_loader, device, output_dir, load_checkpoint=True):
 
     # Save to individual csvs
     df = pd.DataFrame(results)
-    csv_file_path = os.path.join(output_dir, f"test_results.csv")
+    csv_file_path = os.path.join(output_dir, f"test_results_{rank}.csv")
     df.to_csv(csv_file_path, index=False)
     print(f"Saved test results to {csv_file_path}", flush=True)
 
     # Combine results on rank 0
-    # Concatenate all the results into one
-    # combined_df = []
-    # for i in range(world_size):
-    #     csv_file_path = os.path.join(output_dir, f"test_results_{i}.csv")
-    #     if os.path.exists(csv_file_path):
-    #         df = pd.read_csv(csv_file_path)
-    #         combined_df.append(df)
-    #         os.remove(csv_file_path)
-    # combined_df = pd.concat(combined_df, ignore_index=True)
+    if rank == 0:
+        # Concatenate all the results into one
+        combined_df = []
+        for i in range(world_size):
+            csv_file_path = os.path.join(output_dir, f"test_results_{i}.csv")
+            if os.path.exists(csv_file_path):
+                df = pd.read_csv(csv_file_path)
+                combined_df.append(df)
+                os.remove(csv_file_path)
+        combined_df = pd.concat(combined_df, ignore_index=True)
 
-    # Calculate test metrics
-    true_labels = df['true_label']
-    predictions = df['prediction']
-    accuracy = accuracy_score(true_labels, predictions)
-    precision, recall, f1, _ = precision_recall_fscore_support(true_labels, predictions, average='weighted')
-    print(f"Test Results for: Accuracy: {accuracy:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1 Score: {f1:.4f}")
+        # Calculate test metrics
+        true_labels = combined_df['true_label']
+        predictions = combined_df['prediction']
+        accuracy = accuracy_score(true_labels, predictions)
+        precision, recall, f1, _ = precision_recall_fscore_support(true_labels, predictions, average='weighted')
+        print(f"Test Results for: Accuracy: {accuracy:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1 Score: {f1:.4f}")
 
-    # Save confusion matrix
-    # class_names = ['Negative', 'Smoking', 'Eating']
-    # plot_confusion_matrix(true_labels, predictions, class_names, output_dir)
+        # Save confusion matrix
+        # class_names = ['Negative', 'Smoking', 'Eating']
+        # plot_confusion_matrix(true_labels, predictions, class_names, output_dir)
 
-    # Save the combined DataFrame to the final CSV
-    # final_csv_path = os.path.join(output_dir, f"test_results.csv")
-    # combined_df.to_csv(final_csv_path, index=False)  # Save the combined results
-    # print(f"Saved combined test results to {final_csv_path}", flush=True)
-
-    # Cleanup
-    # dist.destroy_process_group()
+        # Save the combined DataFrame to the final CSV
+        final_csv_path = os.path.join(output_dir, f"test_results.csv")
+        combined_df.to_csv(final_csv_path, index=False)  # Save the combined results
+        print(f"Saved combined test results to {final_csv_path}", flush=True)
 
 
 def lopo_test(params, world_size, participant_pids, output_dir):
